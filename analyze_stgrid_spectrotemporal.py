@@ -58,8 +58,14 @@ AUD_ROIS = ['L-HG', 'L-PT', 'L-PP', 'L-STGa', 'L-STGp',
 
 
 ''' Step 1 — Load stimulus grid '''
-grid = pd.read_csv(grid_txt, sep='\t', header=None,
-                   names=['idx', 'temporal_hz', 'spectral_coct'])
+grid = pd.read_csv(grid_txt, sep=r'\s+', header=None,
+                   names=['temporal_hz', 'spectral_coct'])
+
+print(grid)
+print(grid.dtypes)
+
+grid.dropna(inplace=True)
+
 temporal_rates = sorted(grid['temporal_hz'].unique())    # [1.6, 6.07, 10.53, 15]
 spectral_rates = sorted(grid['spectral_coct'].unique())  # [0.16, 0.94, 1.72, 2.5]
 n_t = len(temporal_rates)
@@ -67,8 +73,8 @@ n_s = len(spectral_rates)
 
 # map condition name (stim01 etc.) to (temporal_idx, spectral_idx) in the 4x4 grid
 stim_to_grid = {}
-for _, row in grid.iterrows():
-    cond = f'stim{int(row.idx):02d}'
+for i, (_, row) in enumerate(grid.iterrows()):
+    cond = f'stim{i+1:02d}'
     t_idx = temporal_rates.index(row.temporal_hz)
     s_idx = spectral_rates.index(row.spectral_coct)
     stim_to_grid[cond] = (t_idx, s_idx)
