@@ -6,10 +6,8 @@ import numpy as np
 import nibabel as nib
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
 from glob import glob
-from nilearn.maskers import NiftiMasker
 from nilearn import plotting, image
 
 
@@ -55,6 +53,18 @@ glmsingle_dir = os.path.join(bidsroot, 'derivatives', 'glmsingle_stgrid',
 # auditory cortex ROI labels from MNI dseg (bilateral HG, PT, PP, STGa, STGp)
 AUD_ROIS = ['L-HG', 'L-PT', 'L-PP', 'L-STGa', 'L-STGp',
             'R-HG', 'R-PT', 'R-PP', 'R-STGa', 'R-STGp']
+
+# subcortical ROIs: (label, atlas_dir_suffix)
+SUBCORT_ROIS = [('L-IC',  'subcort-aud'),
+                ('R-IC',  'subcort-aud'),
+                ('L-MGN', 'subcort-aud'),
+                ('R-MGN', 'subcort-aud')]
+
+# cortical ROIs for per-ROI response surfaces
+CORTEX_ROIS = [('L-HG',   'dseg'), ('R-HG',   'dseg'),
+               ('L-PT',   'dseg'), ('R-PT',   'dseg'),
+               ('L-STGp', 'dseg'), ('R-STGp', 'dseg'),
+               ('L-STGa', 'dseg'), ('R-STGa', 'dseg')]
 
 
 ''' Step 1 — Load stimulus grid '''
@@ -170,12 +180,64 @@ def compute_tuning_maps(betas_4d, cond_names, stim_to_grid,
     sel_temporal = selectivity(temporal_marginal)  # (X, Y, Z)
     sel_spectral = selectivity(spectral_marginal)  # (X, Y, Z)
 
+    # joint 2D center-of-mass: weights from full 4x4 surface simultaneously
+    weights_2d = np.maximum(betas_grid, 0)  # (X, Y, Z, n_t, n_s)
+    w2_sum = weights_2d.sum(axis=(3, 4), keepdims=True)
+    w2_sum = np.where(w2_sum == 0, 1, w2_sum)
+    joint_pref_temporal = (
+        (weights_2d * t_arr[None, None, None, :, None]).sum(axis=(3, 4))
+        / w2_sum.squeeze((3, 4))
+    )
+    joint_pref_spectral = (
+        (weights_2d * s_arr[None, None, None, None, :]).sum(axis=(3, 4))
+        / w2_sum.squeeze((3, 4))
+    )
+
     return {
-        'pref_temporal': pref_temporal,
-        'pref_spectral': pref_spectral,
-        'sel_temporal':  sel_temporal,
-        'sel_spectral':  sel_spectral,
+        'pref_temporal':       pref_temporal,
+        'pref_spectral':       pref_spectral,
+        'sel_temporal':        sel_temporal,
+        'sel_spectral':        sel_spectral,
+        'joint_pref_temporal': joint_pref_temporal,
+        'joint_pref_spectral': joint_pref_spectral,
     }
+
+
+def build_roi_mask(subject_id, mask_dir, space, roi_label, atlas):
+    """Load a single ROI mask nii.gz; returns None if file is missing."""
+    fpath = os.path.join(mask_dir,
+                         f'sub-{subject_id}',
+                         f'space-{space}',
+                         f'masks-{atlas}',
+                         f'sub-{subject_id}_space-{space}_mask-{roi_label}.nii.gz')
+    if not os.path.exists(fpath):
+        print(f'  WARNING: mask not found: {fpath}')
+        return None
+    return nib.load(fpath)
+
+
+def compute_roi_response_surface(betas_4d, mask_img, ref_img,
+                                 stim_to_grid, temporal_rates, spectral_rates):
+    """
+    Average betas across voxels within a ROI mask → (n_t, n_s) response surface.
+    Returns None if the mask contains no voxels.
+    """
+    mask_data = image.resample_to_img(
+        mask_img, ref_img, interpolation='nearest'
+    ).get_fdata().astype(bool)
+    betas_roi = betas_4d[mask_data]  # (n_voxels, n_conditions)
+    if betas_roi.shape[0] == 0:
+        return None
+
+    n_t, n_s = len(temporal_rates), len(spectral_rates)
+    sorted_conds = sorted(stim_to_grid.keys(), key=lambda c: stim_to_grid[c])
+    # betas_roi columns are already sorted by condition name (stim01..stim16)
+    # reorder to match grid layout
+    cond_names_sorted = sorted(stim_to_grid.keys())
+    grid_order = [cond_names_sorted.index(c) for c in sorted_conds]
+    betas_ordered = betas_roi[:, grid_order]  # (n_voxels, 16)
+    surface = betas_ordered.reshape(betas_roi.shape[0], n_t, n_s).mean(axis=0)
+    return surface  # (n_t, n_s)
 
 
 def save_map(data, ref_img, fpath):
@@ -184,7 +246,8 @@ def save_map(data, ref_img, fpath):
     print(f'  saved {fpath}')
 
 
-MAP_NAMES = ['pref_temporal', 'pref_spectral', 'sel_temporal', 'sel_spectral']
+MAP_NAMES = ['pref_temporal', 'pref_spectral', 'sel_temporal', 'sel_spectral',
+             'joint_pref_temporal', 'joint_pref_spectral']
 
 if sub_filter:
     ''' Steps 2–4: Per-subject processing (runs when --sub is provided) '''
@@ -215,9 +278,56 @@ if sub_filter:
         sub_out = os.path.join(out_dir, f'sub-{subject_id}')
         os.makedirs(sub_out, exist_ok=True)
         for map_name, map_data in maps.items():
-            fpath = os.path.join(sub_out,
-                                 f'sub-{subject_id}_task-stgrid_map-{map_name}.nii.gz')
+            fpath = os.path.join(
+                sub_out,
+                f'sub-{subject_id}_task-stgrid_map-{map_name}.nii.gz'
+            )
             save_map(map_data, ref_img, fpath)
+
+        # per-ROI analysis: voxelwise maps + mean response surface
+        all_rois = SUBCORT_ROIS + CORTEX_ROIS
+        for roi_label, atlas in all_rois:
+            roi_mask = build_roi_mask(subject_id, mask_dir, space,
+                                      roi_label, atlas)
+            if roi_mask is None:
+                continue
+
+            # voxelwise tuning maps within this ROI
+            mask_data = image.resample_to_img(
+                roi_mask, ref_img, interpolation='nearest'
+            ).get_fdata().astype(bool)
+            betas_roi_4d = betas_4d.copy()
+            betas_roi_4d[~mask_data] = 0.0
+            roi_maps = compute_tuning_maps(betas_roi_4d, cond_names,
+                                           stim_to_grid,
+                                           temporal_rates, spectral_rates)
+            for map_name, map_data in roi_maps.items():
+                fpath = os.path.join(
+                    sub_out,
+                    f'sub-{subject_id}_task-stgrid'
+                    f'_roi-{roi_label}_map-{map_name}.nii.gz'
+                )
+                save_map(map_data, ref_img, fpath)
+
+            # mean response surface (n_t x n_s) saved as CSV
+            surface = compute_roi_response_surface(
+                betas_4d, roi_mask, ref_img,
+                stim_to_grid, temporal_rates, spectral_rates
+            )
+            if surface is not None:
+                surf_df = pd.DataFrame(
+                    surface,
+                    index=temporal_rates,
+                    columns=spectral_rates
+                )
+                surf_df.index.name = 'temporal_hz'
+                surf_df.columns.name = 'spectral_coct'
+                csv_fpath = os.path.join(
+                    sub_out,
+                    f'sub-{subject_id}_task-stgrid_roi-{roi_label}_surface.csv'
+                )
+                surf_df.to_csv(csv_fpath)
+                print(f'  saved {csv_fpath}')
 
     print('\nPer-subject processing complete.')
 
@@ -240,6 +350,28 @@ else:
         nib.save(group_mean, group_fpath)
         group_imgs[map_name] = group_mean
         print(f'  saved {group_fpath}')
+
+    # group mean response surfaces per ROI
+    print('\n--- Computing group ROI response surfaces ---')
+    all_rois = SUBCORT_ROIS + CORTEX_ROIS
+    group_surfaces = {}
+    for roi_label, _ in all_rois:
+        csv_fpaths = sorted(glob(os.path.join(
+            out_dir, 'sub-*',
+            f'*_roi-{roi_label}_surface.csv'
+        )))
+        if not csv_fpaths:
+            print(f'  No surface CSVs for {roi_label}, skipping')
+            continue
+        surfaces = [pd.read_csv(f, index_col=0) for f in csv_fpaths]
+        group_surf = pd.concat(surfaces).groupby(level=0).mean()
+        group_surf_fpath = os.path.join(
+            group_out,
+            f'group_task-stgrid_roi-{roi_label}_surface.csv'
+        )
+        group_surf.to_csv(group_surf_fpath)
+        group_surfaces[roi_label] = group_surf
+        print(f'  saved {group_surf_fpath} ({len(csv_fpaths)} subjects)')
 
 
 ''' Step 6: Visualization (group mode only) '''
@@ -301,5 +433,35 @@ for map_name, title, cmap in [
         display.savefig(fig_fpath)
         display.close()
         print(f'  saved {fig_fpath}')
+
+# ROI response surface heatmaps
+if group_surfaces:
+    roi_order = [r for r, _ in SUBCORT_ROIS + CORTEX_ROIS
+                 if r in group_surfaces]
+    n_rois = len(roi_order)
+    fig, axes = plt.subplots(1, n_rois, figsize=(3 * n_rois, 3.5),
+                             constrained_layout=True)
+    if n_rois == 1:
+        axes = [axes]
+    for ax, roi_label in zip(axes, roi_order):
+        surf = group_surfaces[roi_label].values
+        vmax = np.abs(surf).max()
+        im = ax.imshow(surf, aspect='auto', origin='lower',
+                       cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+        ax.set_title(roi_label, fontsize=9)
+        ax.set_xlabel('Spectral (cyc/oct)', fontsize=7)
+        ax.set_ylabel('Temporal (Hz)', fontsize=7)
+        ax.set_xticks(range(len(spectral_rates)))
+        ax.set_yticks(range(len(temporal_rates)))
+        ax.set_xticklabels([f'{r:.2f}' for r in spectral_rates],
+                           fontsize=6)
+        ax.set_yticklabels([f'{r:.1f}' for r in temporal_rates],
+                           fontsize=6)
+        fig.colorbar(im, ax=ax, shrink=0.7, label='β')
+    heatmap_fpath = os.path.join(fig_dir,
+                                 'group_task-stgrid_roi-surfaces.png')
+    fig.savefig(heatmap_fpath, dpi=150)
+    plt.close(fig)
+    print(f'  saved {heatmap_fpath}')
 
 print('\nDone.')
