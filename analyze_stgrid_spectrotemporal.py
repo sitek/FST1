@@ -286,11 +286,13 @@ if sub_filter:
 
         # per-ROI analysis: voxelwise maps + mean response surface
         all_rois = SUBCORT_ROIS + CORTEX_ROIS
+        n_found = 0
         for roi_label, atlas in all_rois:
             roi_mask = build_roi_mask(subject_id, mask_dir, space,
                                       roi_label, atlas)
             if roi_mask is None:
                 continue
+            n_found += 1
 
             # voxelwise tuning maps within this ROI
             mask_data = image.resample_to_img(
@@ -329,6 +331,8 @@ if sub_filter:
                 surf_df.to_csv(csv_fpath)
                 print(f'  saved {csv_fpath}')
 
+        print(f'  ROI masks found: {n_found}/{len(all_rois)}')
+
     print('\nPer-subject processing complete.')
 
 else:
@@ -339,8 +343,9 @@ else:
 
     group_imgs = {}
     for map_name in MAP_NAMES:
+        # use specific pattern to exclude per-ROI maps (which contain '_roi-')
         fpaths = sorted(glob(os.path.join(out_dir, 'sub-*',
-                                          f'*_map-{map_name}.nii.gz')))
+                                          f'*_task-stgrid_map-{map_name}.nii.gz')))
         if not fpaths:
             print(f'  No subject maps found for {map_name}, skipping')
             continue
@@ -350,6 +355,29 @@ else:
         nib.save(group_mean, group_fpath)
         group_imgs[map_name] = group_mean
         print(f'  saved {group_fpath}')
+
+    # group averaging of per-ROI voxelwise maps (for IC, MGN, and cortical ROIs)
+    print('\n--- Computing group per-ROI voxelwise maps ---')
+    all_rois = SUBCORT_ROIS + CORTEX_ROIS
+    group_roi_imgs = {}
+    for roi_label, _ in all_rois:
+        group_roi_imgs[roi_label] = {}
+        for map_name in MAP_NAMES:
+            fpaths = sorted(glob(os.path.join(
+                out_dir, 'sub-*',
+                f'*_task-stgrid_roi-{roi_label}_map-{map_name}.nii.gz'
+            )))
+            if not fpaths:
+                continue
+            print(f'  {roi_label}/{map_name}: {len(fpaths)} subjects')
+            group_roi_mean = image.mean_img([nib.load(f) for f in fpaths])
+            group_fpath = os.path.join(
+                group_out,
+                f'group_task-stgrid_roi-{roi_label}_map-{map_name}.nii.gz'
+            )
+            nib.save(group_roi_mean, group_fpath)
+            group_roi_imgs[roi_label][map_name] = group_roi_mean
+            print(f'    saved {group_fpath}')
 
     # group mean response surfaces per ROI
     print('\n--- Computing group ROI response surfaces ---')
@@ -431,6 +459,43 @@ for map_name, title, cmap in [
         )
         fig_fpath = os.path.join(fig_dir, f'group_task-stgrid_map-{map_name}.png')
         display.savefig(fig_fpath)
+        display.close()
+        print(f'  saved {fig_fpath}')
+
+# zoomed voxelwise plots for subcortical ROIs (IC and MGN)
+# cut_coords are MNI centers: IC ~(0, -36, -14), MGN ~(0, -26, -4)
+SUBCORT_PLOT_CFG = {
+    'L-IC':  ((-4,  -36, -14), 'Inf colliculus (L)'),
+    'R-IC':  (( 4,  -36, -14), 'Inf colliculus (R)'),
+    'L-MGN': ((-14, -26,  -4), 'Med geniculate (L)'),
+    'R-MGN': (( 14, -26,  -4), 'Med geniculate (R)'),
+}
+for map_name, title_suffix, cmap in [
+    ('pref_temporal',       'pref temporal (Hz)',       'RdYlBu_r'),
+    ('pref_spectral',       'pref spectral (cyc/oct)',  'RdYlGn'),
+    ('joint_pref_temporal', 'joint pref temporal (Hz)', 'RdYlBu_r'),
+    ('joint_pref_spectral', 'joint pref spectral (c/o)','RdYlGn'),
+]:
+    for roi_label, (cut_coords, roi_title) in SUBCORT_PLOT_CFG.items():
+        if roi_label not in group_roi_imgs:
+            continue
+        if map_name not in group_roi_imgs[roi_label]:
+            continue
+        roi_img = group_roi_imgs[roi_label][map_name]
+        display = plotting.plot_stat_map(
+            roi_img,
+            title=f'{roi_title} — {title_suffix}',
+            colorbar=True,
+            cmap=cmap,
+            cut_coords=cut_coords,
+            display_mode='ortho',
+            annotate=True,
+        )
+        fig_fpath = os.path.join(
+            fig_dir,
+            f'group_task-stgrid_roi-{roi_label}_map-{map_name}.png'
+        )
+        display.savefig(fig_fpath, dpi=200)
         display.close()
         print(f'  saved {fig_fpath}')
 
