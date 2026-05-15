@@ -184,66 +184,69 @@ def save_map(data, ref_img, fpath):
     print(f'  saved {fpath}')
 
 
-''' Step 2–4: Per-subject processing '''
-sub_dirs = sorted(glob(os.path.join(glmsingle_dir, 'sub-*')))
+MAP_NAMES = ['pref_temporal', 'pref_spectral', 'sel_temporal', 'sel_spectral']
+
 if sub_filter:
-    sub_dirs = [d for d in sub_dirs if os.path.basename(d) == f'sub-{sub_filter}']
+    ''' Steps 2–4: Per-subject processing (runs when --sub is provided) '''
+    sub_dirs = [os.path.join(glmsingle_dir, f'sub-{sub_filter}')]
 
-subject_map_fpaths = {k: [] for k in ['pref_temporal', 'pref_spectral',
-                                       'sel_temporal', 'sel_spectral']}
+    for sub_dir in sub_dirs:
+        subject_id = os.path.basename(sub_dir).replace('sub-', '')
+        print(f'\n--- Processing sub-{subject_id} ---')
 
-for sub_dir in sub_dirs:
-    subject_id = os.path.basename(sub_dir).replace('sub-', '')
-    print(f'\n--- Processing sub-{subject_id} ---')
+        betas_4d, cond_names, ref_img = load_beta_4d(subject_id, glmsingle_dir)
+        if betas_4d is None:
+            print('  Skipping — no beta images')
+            continue
 
-    betas_4d, cond_names, ref_img = load_beta_4d(subject_id, glmsingle_dir)
-    if betas_4d is None:
-        print('  Skipping — no beta images')
-        continue
+        aud_mask = build_auditory_mask(subject_id, mask_dir, space, AUD_ROIS)
+        if aud_mask is None:
+            print('  Skipping — no auditory cortex mask')
+            continue
 
-    aud_mask = build_auditory_mask(subject_id, mask_dir, space, AUD_ROIS)
-    if aud_mask is None:
-        print('  Skipping — no auditory cortex mask')
-        continue
+        mask_data = image.resample_to_img(aud_mask, ref_img,
+                                          interpolation='nearest').get_fdata().astype(bool)
+        betas_masked = betas_4d.copy()
+        betas_masked[~mask_data] = 0.0
 
-    # apply mask (zero out non-auditory voxels)
-    mask_data = image.resample_to_img(aud_mask, ref_img,
-                                      interpolation='nearest').get_fdata().astype(bool)
-    betas_masked = betas_4d.copy()
-    betas_masked[~mask_data] = 0.0
+        maps = compute_tuning_maps(betas_masked, cond_names, stim_to_grid,
+                                   temporal_rates, spectral_rates)
 
-    maps = compute_tuning_maps(betas_masked, cond_names, stim_to_grid,
-                               temporal_rates, spectral_rates)
+        sub_out = os.path.join(out_dir, f'sub-{subject_id}')
+        os.makedirs(sub_out, exist_ok=True)
+        for map_name, map_data in maps.items():
+            fpath = os.path.join(sub_out,
+                                 f'sub-{subject_id}_task-stgrid_map-{map_name}.nii.gz')
+            save_map(map_data, ref_img, fpath)
 
-    # save per-subject maps
-    sub_out = os.path.join(out_dir, f'sub-{subject_id}')
-    os.makedirs(sub_out, exist_ok=True)
-    for map_name, map_data in maps.items():
-        fpath = os.path.join(sub_out,
-                             f'sub-{subject_id}_task-stgrid_map-{map_name}.nii.gz')
-        save_map(map_data, ref_img, fpath)
-        subject_map_fpaths[map_name].append(fpath)
+    print('\nPer-subject processing complete.')
 
+else:
+    ''' Step 5: Group average maps (runs when --sub is not provided) '''
+    print('\n--- Computing group average maps ---')
+    group_out = os.path.join(out_dir, 'group')
+    os.makedirs(group_out, exist_ok=True)
 
-''' Step 5: Group average maps '''
-print('\n--- Computing group average maps ---')
-group_out = os.path.join(out_dir, 'group')
-os.makedirs(group_out, exist_ok=True)
-
-group_imgs = {}
-for map_name, fpaths in subject_map_fpaths.items():
-    if not fpaths:
-        print(f'  No subject maps for {map_name}, skipping group average')
-        continue
-    imgs = [nib.load(f) for f in fpaths]
-    group_mean = image.mean_img(imgs)
-    group_fpath = os.path.join(group_out, f'group_task-stgrid_map-{map_name}.nii.gz')
-    nib.save(group_mean, group_fpath)
-    group_imgs[map_name] = group_mean
-    print(f'  saved group map: {group_fpath}')
+    group_imgs = {}
+    for map_name in MAP_NAMES:
+        fpaths = sorted(glob(os.path.join(out_dir, 'sub-*',
+                                          f'*_map-{map_name}.nii.gz')))
+        if not fpaths:
+            print(f'  No subject maps found for {map_name}, skipping')
+            continue
+        print(f'  Averaging {len(fpaths)} subjects for {map_name}')
+        group_mean = image.mean_img([nib.load(f) for f in fpaths])
+        group_fpath = os.path.join(group_out, f'group_task-stgrid_map-{map_name}.nii.gz')
+        nib.save(group_mean, group_fpath)
+        group_imgs[map_name] = group_mean
+        print(f'  saved {group_fpath}')
 
 
-''' Step 6: Visualization '''
+''' Step 6: Visualization (group mode only) '''
+if sub_filter:
+    print('\nDone.')
+    sys.exit(0)
+
 print('\n--- Generating figures ---')
 
 fig_dir = os.path.join(out_dir, 'figures')
