@@ -138,7 +138,7 @@ def save_betas_as_nifti(results, condition_names, ref_nib_img, outputdir):
     header = ref_nib_img.header
     for i, cond_name in enumerate(condition_names):
         img = nib.Nifti1Image(betas[:, :, :, i].astype(np.float32), affine, header)
-        out_fpath = os.path.join(beta_dir, f'di{i+1:02d}_{cond_name}.nii.gz')
+        out_fpath = os.path.join(beta_dir, f'{cond_name}.nii.gz')
         nib.save(img, out_fpath)
         print(f'  saved {out_fpath}')
     print(f'Saved {len(condition_names)} beta images to {beta_dir}')

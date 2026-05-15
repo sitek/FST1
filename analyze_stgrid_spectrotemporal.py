@@ -107,13 +107,12 @@ def load_beta_4d(subject_id, glmsingle_dir):
     Returns (4D array, list of condition names, reference nibabel image).
     """
     beta_dir = os.path.join(glmsingle_dir, f'sub-{subject_id}', 'beta_images')
-    beta_files = sorted(glob(os.path.join(beta_dir, 'di*_stim*.nii.gz')))
+    beta_files = sorted(glob(os.path.join(beta_dir, 'stim*.nii.gz')))
     if not beta_files:
         print(f'  No beta images found in {beta_dir}')
         return None, None, None
     ref_img = nib.load(beta_files[0])
-    cond_names = [os.path.basename(f).split('_', 1)[1].replace('.nii.gz', '')
-                  for f in beta_files]
+    cond_names = [os.path.basename(f).replace('.nii.gz', '') for f in beta_files]
     betas_4d = np.stack([nib.load(f).get_fdata() for f in beta_files], axis=-1)
     return betas_4d, cond_names, ref_img
 
