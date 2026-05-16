@@ -6,6 +6,7 @@ import numpy as np
 import nibabel as nib
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 from glob import glob
 from nilearn import plotting, image
@@ -246,6 +247,76 @@ def save_map(data, ref_img, fpath):
     print(f'  saved {fpath}')
 
 
+def plot_bivariate_map(pref_t_img, pref_s_img,
+                       temporal_rates, spectral_rates,
+                       title, out_fpath,
+                       z_slices_mni=None):
+    """
+    Brain map where hue = preferred temporal rate, saturation = preferred
+    spectral rate. Voxels with pref_temporal == 0 are treated as out-of-mask.
+    Includes a 2-D color legend subplot.
+    """
+    pref_t = pref_t_img.get_fdata()
+    pref_s = pref_s_img.get_fdata()
+    affine = pref_t_img.affine
+    inv_aff = np.linalg.inv(affine)
+
+    mask = pref_t > 0
+
+    t_min, t_max = temporal_rates[0], temporal_rates[-1]
+    s_min, s_max = spectral_rates[0], spectral_rates[-1]
+
+    h = np.clip((pref_t - t_min) / (t_max - t_min), 0, 1)
+    s = np.clip((pref_s - s_min) / (s_max - s_min), 0, 1)
+    v = np.ones_like(h)
+
+    shape = h.shape
+    hsv = np.stack([h, s, v], axis=-1)
+    rgb = mcolors.hsv_to_rgb(hsv.reshape(-1, 3)).reshape(*shape, 3)
+
+    if z_slices_mni is None:
+        z_slices_mni = [-20, -10, 0, 10, 20, 30]
+
+    def mni_to_vox_z(mni_z):
+        c = inv_aff @ np.array([0, 0, mni_z, 1])
+        return int(np.round(c[2]))
+
+    vox_zs = [mni_to_vox_z(z) for z in z_slices_mni]
+    n = len(z_slices_mni)
+
+    fig, axes = plt.subplots(1, n + 1, figsize=(3 * n + 3, 3.5))
+
+    for ax, (mni_z, vox_z) in zip(axes[:n], zip(z_slices_mni, vox_zs)):
+        ax.set_facecolor('k')
+        if 0 <= vox_z < shape[2]:
+            sl_rgb = rgb[:, :, vox_z, :]
+            sl_mask = mask[:, :, vox_z]
+            sl_rgba = np.zeros((*sl_rgb.shape[:2], 4), dtype=np.float32)
+            sl_rgba[sl_mask, :3] = sl_rgb[sl_mask]
+            sl_rgba[sl_mask, 3] = 1.0
+            ax.imshow(np.rot90(sl_rgba), aspect='equal', interpolation='nearest')
+        ax.set_title(f'z={mni_z}', fontsize=8)
+        ax.axis('off')
+
+    # 2-D color legend: x = temporal (hue), y = spectral (saturation)
+    ax_leg = axes[-1]
+    res = 64
+    T2, S2 = np.meshgrid(np.linspace(0, 1, res), np.linspace(0, 1, res))
+    legend_hsv = np.stack([T2, S2, np.ones_like(T2)], axis=-1)
+    legend_rgb = mcolors.hsv_to_rgb(legend_hsv)
+    ax_leg.imshow(legend_rgb, origin='lower', aspect='auto',
+                  extent=[t_min, t_max, s_min, s_max])
+    ax_leg.set_xlabel('Temporal pref (Hz)', fontsize=8)
+    ax_leg.set_ylabel('Spectral pref (cyc/oct)', fontsize=8)
+    ax_leg.set_title('Color key', fontsize=8)
+
+    fig.suptitle(title, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_fpath, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  saved {out_fpath}')
+
+
 MAP_NAMES = ['pref_temporal', 'pref_spectral', 'sel_temporal', 'sel_spectral',
              'joint_pref_temporal', 'joint_pref_spectral']
 
@@ -461,6 +532,36 @@ for map_name, title, cmap in [
         display.savefig(fig_fpath)
         display.close()
         print(f'  saved {fig_fpath}')
+
+# bivariate joint spectrotemporal map (auditory cortex)
+if 'joint_pref_temporal' in group_imgs and 'joint_pref_spectral' in group_imgs:
+    plot_bivariate_map(
+        group_imgs['joint_pref_temporal'],
+        group_imgs['joint_pref_spectral'],
+        temporal_rates, spectral_rates,
+        title='Group joint spectrotemporal preference (hue=temporal, sat=spectral)',
+        out_fpath=os.path.join(fig_dir, 'group_task-stgrid_map-bivariate.png'),
+        z_slices_mni=[-20, -10, 0, 10, 20, 30],
+    )
+
+# bivariate maps for each subcortical ROI (zoomed z-slices)
+SUBCORT_Z = {'L-IC': [-20, -16, -12], 'R-IC': [-20, -16, -12],
+             'L-MGN': [-8, -4, 0],    'R-MGN': [-8, -4, 0]}
+for roi_label in ['L-IC', 'R-IC', 'L-MGN', 'R-MGN']:
+    if roi_label not in group_roi_imgs:
+        continue
+    ri = group_roi_imgs[roi_label]
+    if 'joint_pref_temporal' not in ri or 'joint_pref_spectral' not in ri:
+        continue
+    plot_bivariate_map(
+        ri['joint_pref_temporal'],
+        ri['joint_pref_spectral'],
+        temporal_rates, spectral_rates,
+        title=f'{roi_label} joint spectrotemporal preference',
+        out_fpath=os.path.join(
+            fig_dir, f'group_task-stgrid_roi-{roi_label}_map-bivariate.png'),
+        z_slices_mni=SUBCORT_Z[roi_label],
+    )
 
 # zoomed voxelwise plots for subcortical ROIs (IC and MGN)
 # cut_coords are MNI centers: IC ~(0, -36, -14), MGN ~(0, -26, -4)
