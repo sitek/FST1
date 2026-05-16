@@ -144,6 +144,16 @@ def save_betas_as_nifti(results, condition_names, ref_nib_img, outputdir):
     print(f'Saved {len(condition_names)} beta images to {beta_dir}')
 
 
+def save_r2_as_nifti(results, ref_nib_img, outputdir):
+    """Save GLMsingle R² map (converted from 0–100 to 0–1 proportion)."""
+    r2_raw = results['typed']['R2']   # (X, Y, Z), values 0–100
+    r2 = (r2_raw / 100.0).astype(np.float32)
+    img = nib.Nifti1Image(r2, ref_nib_img.affine, ref_nib_img.header)
+    out_fpath = os.path.join(outputdir, 'R2.nii.gz')
+    nib.save(img, out_fpath)
+    print(f'  saved {out_fpath}')
+
+
 ''' Start the modeling pipeline '''
 print('bidsroot: ', bidsroot)
 print('fmriprep dir:', fmriprep_dir)
@@ -221,10 +231,11 @@ if not os.path.exists(outputdir_glmsingle):
         tr,
         outputdir=outputdir_glmsingle)
 
-    # save TYPED beta estimates as per-condition nii.gz files
+    # save TYPED beta estimates and R² as nii.gz files
     ref_img = nib.load(models_run_imgs[0][0])
     save_betas_as_nifti(results_glmsingle, canonical_condition_names,
                         ref_img, outputdir_glmsingle)
+    save_r2_as_nifti(results_glmsingle, ref_img, outputdir_glmsingle)
 
 else:
     print('GLMsingle outputs already exist, loading from:\n', outputdir_glmsingle)
@@ -242,14 +253,19 @@ else:
                                               'TYPED_FITHRF_GLMDENOISE_RR.npy'),
                                          allow_pickle=True).item()
 
-    # save nii.gz betas if not already done
+    # save nii.gz betas and R² if not already done
+    ref_img = nib.load(models_run_imgs[0][0])
     beta_dir = os.path.join(outputdir_glmsingle, 'beta_images')
     if not os.path.exists(beta_dir):
-        ref_img = nib.load(models_run_imgs[0][0])
         save_betas_as_nifti(results_glmsingle, canonical_condition_names,
                             ref_img, outputdir_glmsingle)
     else:
         print('beta_images directory already exists, skipping nii.gz export')
+    r2_path = os.path.join(outputdir_glmsingle, 'R2.nii.gz')
+    if not os.path.exists(r2_path):
+        save_r2_as_nifti(results_glmsingle, ref_img, outputdir_glmsingle)
+    else:
+        print('R2.nii.gz already exists, skipping')
 
 elapsed_time = time.time() - start_time
 print('\telapsed time: ',

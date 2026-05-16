@@ -6,7 +6,7 @@ import numpy as np
 import nibabel as nib
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
+
 
 from glob import glob
 from nilearn import plotting, image
@@ -32,6 +32,9 @@ parser.add_argument('--space', help='MNI space label', type=str,
                     default='MNI152NLin2009cAsym')
 parser.add_argument('--sub', help='single subject to process (omit for all)', type=str,
                     default=None)
+parser.add_argument('--r2_threshold', type=float, default=0.05,
+                    help='Min R² (proportion 0–1) for voxel inclusion; '
+                         'applied on top of anatomical mask (default 0.05)')
 
 args = parser.parse_args()
 
@@ -39,12 +42,13 @@ if len(sys.argv) < 2:
     parser.print_help()
     sys.exit(1)
 
-bidsroot  = args.bidsroot
-mask_dir  = args.mask_dir
-grid_txt  = args.grid_txt
-out_dir   = args.out_dir
-space     = args.space
-sub_filter = args.sub
+bidsroot     = args.bidsroot
+mask_dir     = args.mask_dir
+grid_txt     = args.grid_txt
+out_dir      = args.out_dir
+space        = args.space
+sub_filter   = args.sub
+r2_threshold = args.r2_threshold
 
 os.makedirs(out_dir, exist_ok=True)
 
@@ -194,6 +198,16 @@ def compute_tuning_maps(betas_4d, cond_names, stim_to_grid,
         / w2_sum.squeeze((3, 4))
     )
 
+    # inseparability index (αSVD): 1 - σ₁²/Σσᵢ²
+    # measures how much the MTF exceeds a rank-1 (separable) approximation
+    flat = betas_grid.reshape(-1, n_t, n_s)              # (N, n_t, n_s)
+    _, sv, _ = np.linalg.svd(flat, full_matrices=False)  # sv: (N, min(n_t,n_s))
+    sv2 = sv ** 2
+    sv2_total = sv2.sum(axis=1)
+    inseparability = np.where(sv2_total > 0,
+                              1.0 - sv2[:, 0] / sv2_total,
+                              0.0).reshape(X, Y, Z)
+
     return {
         'pref_temporal':       pref_temporal,
         'pref_spectral':       pref_spectral,
@@ -201,6 +215,7 @@ def compute_tuning_maps(betas_4d, cond_names, stim_to_grid,
         'sel_spectral':        sel_spectral,
         'joint_pref_temporal': joint_pref_temporal,
         'joint_pref_spectral': joint_pref_spectral,
+        'inseparability':      inseparability,
     }
 
 
@@ -267,11 +282,13 @@ def _bivariate_rgb(norm_t, norm_s):
 def plot_bivariate_map(pref_t_img, pref_s_img,
                        temporal_rates, spectral_rates,
                        title, out_fpath,
-                       z_slices_mni=None):
+                       z_slices_mni=None,
+                       padding_vox=None):
     """
-    Brain map where hue=temporal preference (blue→red, no wrap) and
-    brightness=spectral preference (dark→bright), overlaid on the MNI152
-    brain with a white ROI contour. Includes a 2-D color legend subplot.
+    Brain map where R=1-norm_t, G=norm_t*norm_s, B=1-norm_s (S&Z colormap),
+    overlaid on MNI152 brain with white ROI contour. Includes a 2-D color
+    legend subplot. Pass padding_vox to crop x/y to the mask bounding box
+    (useful for small subcortical ROIs).
     """
     from nilearn import datasets as nl_datasets
 
@@ -301,22 +318,38 @@ def plot_bivariate_map(pref_t_img, pref_s_img,
     if z_slices_mni is None:
         z_slices_mni = [-20, -10, 0, 10, 20, 30]
 
+    # x/y bounding box (crop to mask when padding_vox given)
+    if padding_vox is not None:
+        nz = np.nonzero(mask)
+        if len(nz[0]) > 0:
+            x0 = max(0, nz[0].min() - padding_vox)
+            x1 = min(shape[0] - 1, nz[0].max() + padding_vox)
+            y0 = max(0, nz[1].min() - padding_vox)
+            y1 = min(shape[1] - 1, nz[1].max() + padding_vox)
+        else:
+            x0, x1, y0, y1 = 0, shape[0] - 1, 0, shape[1] - 1
+    else:
+        x0, x1, y0, y1 = 0, shape[0] - 1, 0, shape[1] - 1
+
     def mni_to_vox_z(mni_z):
         c = inv_aff @ np.array([0, 0, mni_z, 1])
-        return int(np.round(c[2]))
+        return int(np.clip(np.round(c[2]), 0, shape[2] - 1))
 
+    # convert to voxel z; keep original MNI labels so titles never repeat
     vox_zs = [mni_to_vox_z(z) for z in z_slices_mni]
     n = len(z_slices_mni)
 
-    fig, axes = plt.subplots(1, n + 1, figsize=(3 * n + 3, 3.5))
+    fig, axes = plt.subplots(1, n + 1, figsize=(3 * n + 3, 3.5),
+                             constrained_layout=True)
 
     alpha = 0.85
-    for ax, (mni_z, vox_z) in zip(axes[:n], zip(z_slices_mni, vox_zs)):
+    for ax, mni_z, vox_z in zip(axes[:n], z_slices_mni, vox_zs):
         if 0 <= vox_z < shape[2]:
-            bg_sl = np.stack([bg[:, :, vox_z]] * 3, axis=-1)
+            bg_sl  = np.stack([bg[x0:x1+1, y0:y1+1, vox_z]] * 3, axis=-1)
+            sl_mask = mask[x0:x1+1, y0:y1+1, vox_z]
+            sl_rgb  = roi_rgb[x0:x1+1, y0:y1+1, vox_z]
             out = bg_sl.copy()
-            sl_mask = mask[:, :, vox_z]
-            out[sl_mask] = (alpha * roi_rgb[:, :, vox_z][sl_mask]
+            out[sl_mask] = (alpha * sl_rgb[sl_mask]
                             + (1 - alpha) * bg_sl[sl_mask])
             ax.imshow(np.rot90(out), aspect='equal', interpolation='nearest')
             ax.contour(np.rot90(sl_mask.astype(float)),
@@ -324,7 +357,7 @@ def plot_bivariate_map(pref_t_img, pref_s_img,
         ax.set_title(f'z={mni_z}', fontsize=8)
         ax.axis('off')
 
-    # 2-D color legend
+    # 2-D color legend in the rightmost panel
     ax_leg = axes[-1]
     res = 64
     T2, S2 = np.meshgrid(np.linspace(0, 1, res), np.linspace(0, 1, res))
@@ -336,7 +369,6 @@ def plot_bivariate_map(pref_t_img, pref_s_img,
     ax_leg.set_title('Color key', fontsize=8)
 
     fig.suptitle(title, fontsize=9)
-    fig.tight_layout()
     fig.savefig(out_fpath, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f'  saved {out_fpath}')
@@ -373,11 +405,15 @@ def plot_roi_zoomed(roi_img, title, out_fpath, cmap='RdYlBu_r',
     z1 = min(data.shape[2] - 1, nz[2].max() + padding_vox)
 
     if z_slices_mni is not None:
-        z_indices = [int(np.round((inv_aff @ [0, 0, z, 1])[2]))
+        # clip to valid data range only; keep original MNI labels as titles
+        z_indices = [int(np.clip(int(np.round((inv_aff @ [0, 0, z, 1])[2])),
+                                 0, data.shape[2] - 1))
                      for z in z_slices_mni]
-        z_indices = [np.clip(zi, z0, z1) for zi in z_indices]
+        z_labels = list(z_slices_mni)
     else:
         z_indices = list(np.round(np.linspace(z0, z1, n_slices)).astype(int))
+        z_labels = [int(np.round(nib.affines.apply_affine(affine, [0, 0, zi])[2]))
+                    for zi in z_indices]
 
     n_panels = len(z_indices)
     vmax = np.abs(data[nz]).max()
@@ -395,10 +431,11 @@ def plot_roi_zoomed(roi_img, title, out_fpath, cmap='RdYlBu_r',
     cmap_obj = plt.get_cmap(cmap)
     norm = plt.Normalize(vmin=-vmax, vmax=vmax)
 
-    fig, axes = plt.subplots(1, n_panels, figsize=(3 * n_panels, 3))
+    fig, axes = plt.subplots(1, n_panels, figsize=(3 * n_panels, 3),
+                             constrained_layout=True)
     if n_panels == 1:
         axes = [axes]
-    for ax, zi in zip(axes, z_indices):
+    for ax, zi, z_label in zip(axes, z_indices, z_labels):
         bg_sl = np.stack([bg[x0:x1 + 1, y0:y1 + 1, zi]] * 3, axis=-1)
         out = bg_sl.copy()
         sl_data = data[x0:x1 + 1, y0:y1 + 1, zi]
@@ -406,23 +443,20 @@ def plot_roi_zoomed(roi_img, title, out_fpath, cmap='RdYlBu_r',
         roi_colors = cmap_obj(norm(sl_data[sl_mask]))[:, :3]
         out[sl_mask] = 0.85 * roi_colors + 0.15 * bg_sl[sl_mask]
         ax.imshow(np.rot90(out), aspect='equal', interpolation='nearest')
-        mni_z = int(np.round(
-            nib.affines.apply_affine(affine, [0, 0, zi])[2]))
-        ax.set_title(f'z={mni_z}mm', fontsize=8)
+        ax.set_title(f'z={z_label}mm', fontsize=8)
         ax.axis('off')
 
     sm = plt.cm.ScalarMappable(
         cmap=cmap, norm=plt.Normalize(vmin=-vmax, vmax=vmax))
-    fig.colorbar(sm, ax=axes, shrink=0.8)
+    fig.colorbar(sm, ax=axes[-1], shrink=0.8, pad=0.05)
     fig.suptitle(title, fontsize=9)
-    fig.tight_layout()
     fig.savefig(out_fpath, dpi=200, bbox_inches='tight')
     plt.close(fig)
     print(f'  saved {out_fpath}')
 
 
 MAP_NAMES = ['pref_temporal', 'pref_spectral', 'sel_temporal', 'sel_spectral',
-             'joint_pref_temporal', 'joint_pref_spectral']
+             'joint_pref_temporal', 'joint_pref_spectral', 'inseparability']
 
 if sub_filter:
     ''' Steps 2–4: Per-subject processing (runs when --sub is provided) '''
@@ -442,10 +476,25 @@ if sub_filter:
             print('  Skipping — no auditory cortex mask')
             continue
 
-        mask_data = image.resample_to_img(aud_mask, ref_img,
-                                          interpolation='nearest').get_fdata().astype(bool)
+        aud_mask_data = image.resample_to_img(aud_mask, ref_img,
+                                               interpolation='nearest').get_fdata().astype(bool)
+
+        # load R² mask if available
+        r2_path = os.path.join(glmsingle_dir, f'sub-{subject_id}', 'R2.nii.gz')
+        r2_data = None
+        if os.path.exists(r2_path):
+            r2_data = image.resample_to_img(
+                nib.load(r2_path), ref_img, interpolation='continuous'
+            ).get_fdata()
+            r2_mask = r2_data >= r2_threshold
+            print(f'  R² mask: {r2_mask.sum()} voxels ≥ {r2_threshold}')
+            combined_mask = aud_mask_data & r2_mask
+        else:
+            print('  WARNING: R2.nii.gz not found — no R² masking')
+            combined_mask = aud_mask_data
+
         betas_masked = betas_4d.copy()
-        betas_masked[~mask_data] = 0.0
+        betas_masked[~combined_mask] = 0.0
 
         maps = compute_tuning_maps(betas_masked, cond_names, stim_to_grid,
                                    temporal_rates, spectral_rates)
@@ -459,6 +508,11 @@ if sub_filter:
             )
             save_map(map_data, ref_img, fpath)
 
+        # save R² map for group averaging
+        if r2_data is not None:
+            save_map(r2_data, ref_img, os.path.join(
+                sub_out, f'sub-{subject_id}_task-stgrid_map-R2.nii.gz'))
+
         # per-ROI analysis: voxelwise maps + mean response surface
         all_rois = SUBCORT_ROIS + CORTEX_ROIS
         n_found = 0
@@ -470,11 +524,11 @@ if sub_filter:
             n_found += 1
 
             # voxelwise tuning maps within this ROI
-            mask_data = image.resample_to_img(
+            roi_vox_mask = image.resample_to_img(
                 roi_mask, ref_img, interpolation='nearest'
             ).get_fdata().astype(bool)
             betas_roi_4d = betas_4d.copy()
-            betas_roi_4d[~mask_data] = 0.0
+            betas_roi_4d[~roi_vox_mask] = 0.0
             roi_maps = compute_tuning_maps(betas_roi_4d, cond_names,
                                            stim_to_grid,
                                            temporal_rates, spectral_rates)
@@ -485,6 +539,20 @@ if sub_filter:
                     f'_roi-{roi_label}_map-{map_name}.nii.gz'
                 )
                 save_map(map_data, ref_img, fpath)
+
+            # per-ROI scalar means (R²-masked) for group t-tests
+            r2_roi_mask = (roi_vox_mask & r2_mask) if r2_data is not None else roi_vox_mask
+            means_dict = {}
+            for stat in ['pref_temporal', 'pref_spectral', 'sel_temporal', 'sel_spectral']:
+                vals = roi_maps[stat][r2_roi_mask]
+                means_dict[stat] = float(vals.mean()) if vals.size > 0 else float('nan')
+            means_df = pd.DataFrame([means_dict])
+            means_csv = os.path.join(
+                sub_out,
+                f'sub-{subject_id}_task-stgrid_roi-{roi_label}_means.csv'
+            )
+            means_df.to_csv(means_csv, index=False)
+            print(f'  saved {means_csv}')
 
             # mean response surface (n_t x n_s) saved as CSV
             surface = compute_roi_response_surface(
@@ -554,6 +622,19 @@ else:
             group_roi_imgs[roi_label][map_name] = group_roi_mean
             print(f'    saved {group_fpath}')
 
+    # group average R² map
+    r2_fpaths = sorted(glob(os.path.join(
+        out_dir, 'sub-*', '*_task-stgrid_map-R2.nii.gz'
+    )))
+    if r2_fpaths:
+        print(f'\n--- Averaging R² maps ({len(r2_fpaths)} subjects) ---')
+        group_r2 = image.mean_img([nib.load(f) for f in r2_fpaths])
+        r2_group_fpath = os.path.join(
+            group_out, 'group_task-stgrid_map-R2.nii.gz'
+        )
+        nib.save(group_r2, r2_group_fpath)
+        print(f'  saved {r2_group_fpath}')
+
     # group mean response surfaces per ROI
     print('\n--- Computing group ROI response surfaces ---')
     all_rois = SUBCORT_ROIS + CORTEX_ROIS
@@ -575,6 +656,59 @@ else:
         group_surf.to_csv(group_surf_fpath)
         group_surfaces[roi_label] = group_surf
         print(f'  saved {group_surf_fpath} ({len(csv_fpaths)} subjects)')
+
+    # group ROI statistics: subject-level means → one-sample t-test per ROI
+    print('\n--- Computing group ROI statistics ---')
+    from scipy import stats as sp_stats
+    roi_labels_ordered = [r for r, _ in SUBCORT_ROIS + CORTEX_ROIS]
+    stat_cols = ['pref_temporal', 'pref_spectral', 'sel_temporal', 'sel_spectral']
+    all_stat_rows = []
+    for map_stat in stat_cols:
+        # build (subjects × ROIs) DataFrame
+        sub_means = {}
+        for roi_label in roi_labels_ordered:
+            means_fpaths = sorted(glob(os.path.join(
+                out_dir, 'sub-*',
+                f'*_task-stgrid_roi-{roi_label}_means.csv'
+            )))
+            if not means_fpaths:
+                continue
+            vals = [pd.read_csv(f)[map_stat].iloc[0]
+                    for f in means_fpaths]
+            sub_means[roi_label] = vals
+
+        if not sub_means:
+            continue
+
+        # grand mean across all ROIs (per subject) as null reference
+        df_wide = pd.DataFrame(sub_means)   # subjects × ROIs
+        grand_mean_val = df_wide.values[~np.isnan(df_wide.values)].mean()
+
+        for roi_label, vals in sub_means.items():
+            arr = np.array(vals, dtype=float)
+            arr = arr[~np.isnan(arr)]
+            if len(arr) < 2:
+                continue
+            t, p = sp_stats.ttest_1samp(arr, grand_mean_val)
+            all_stat_rows.append({
+                'map': map_stat,
+                'roi': roi_label,
+                'n': len(arr),
+                'mean': arr.mean(),
+                'sem': arr.std(ddof=1) / np.sqrt(len(arr)),
+                't': t,
+                'p_uncorr': p,
+            })
+
+    if all_stat_rows:
+        stats_df = pd.DataFrame(all_stat_rows)
+        n_tests = len(stats_df)
+        stats_df['p_bonf'] = np.minimum(stats_df['p_uncorr'] * n_tests, 1.0)
+        stats_fpath = os.path.join(
+            group_out, 'group_task-stgrid_roi-stats.csv'
+        )
+        stats_df.to_csv(stats_fpath, index=False, float_format='%.4f')
+        print(f'  saved {stats_fpath} ({n_tests} tests)')
 
 ''' Step 6: Visualization (group mode only) '''
 if sub_filter:
@@ -616,10 +750,11 @@ if 'pref_spectral' in group_imgs:
     display.close()
     print(f'  saved {fig_fpath}')
 
-# selectivity index maps
-for map_name, title, cmap in [
-    ('sel_temporal', 'Temporal modulation selectivity index', 'hot'),
-    ('sel_spectral', 'Spectral modulation selectivity index', 'hot'),
+# selectivity and inseparability maps
+for map_name, title, cmap, vmin, vmax in [
+    ('sel_temporal',   'Temporal modulation selectivity index',  'hot', 0, 1),
+    ('sel_spectral',   'Spectral modulation selectivity index',  'hot', 0, 1),
+    ('inseparability', 'Spectrotemporal inseparability (αSVD)',  'hot', 0, 1),
 ]:
     if map_name in group_imgs:
         display = plotting.plot_stat_map(
@@ -627,14 +762,32 @@ for map_name, title, cmap in [
             title=f'Group {title}',
             colorbar=True,
             cmap=cmap,
-            vmin=0, vmax=1,
+            vmin=vmin, vmax=vmax,
             cut_coords=(-50, -20, 10),
             display_mode='ortho',
         )
-        fig_fpath = os.path.join(fig_dir, f'group_task-stgrid_map-{map_name}.png')
+        fig_fpath = os.path.join(
+            fig_dir, f'group_task-stgrid_map-{map_name}.png'
+        )
         display.savefig(fig_fpath)
         display.close()
         print(f'  saved {fig_fpath}')
+
+# R² map (mean across subjects)
+if r2_fpaths:
+    display = plotting.plot_stat_map(
+        group_r2,
+        title='Group mean R² (GLMsingle)',
+        colorbar=True,
+        cmap='hot',
+        vmin=0, vmax=0.3,
+        cut_coords=(-50, -20, 10),
+        display_mode='ortho',
+    )
+    fig_fpath = os.path.join(fig_dir, 'group_task-stgrid_map-R2.png')
+    display.savefig(fig_fpath)
+    display.close()
+    print(f'  saved {fig_fpath}')
 
 # bivariate joint spectrotemporal map (auditory cortex)
 if 'joint_pref_temporal' in group_imgs and 'joint_pref_spectral' in group_imgs:
@@ -672,14 +825,15 @@ for struct, lbl_l, lbl_r, z_slices in BILATERAL:
                 fig_dir,
                 f'group_task-stgrid_roi-{struct}_map-bivariate.png'),
             z_slices_mni=z_slices,
+            padding_vox=8,
         )
 
     # zoomed single-colormap maps (bilateral, one PNG per map type)
     for map_name, title_suffix, cmap in [
-        ('pref_temporal',       'pref temporal (Hz)',      'RdYlBu_r'),
-        ('pref_spectral',       'pref spectral (cyc/oct)', 'RdYlGn'),
-        ('joint_pref_temporal', 'joint pref temporal (Hz)','RdYlBu_r'),
-        ('joint_pref_spectral', 'joint pref spectral (c/o)','RdYlGn'),
+        ('pref_temporal', 'pref temporal (Hz)',      'RdYlBu_r'),
+        ('pref_spectral', 'pref spectral (cyc/oct)', 'RdYlGn'),
+        ('sel_temporal',  'selectivity temporal',    'hot'),
+        ('sel_spectral',  'selectivity spectral',    'hot'),
     ]:
         img_l = ri_l.get(map_name)
         img_r = ri_r.get(map_name)
