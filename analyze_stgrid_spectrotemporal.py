@@ -649,8 +649,8 @@ if 'joint_pref_temporal' in group_imgs and 'joint_pref_spectral' in group_imgs:
 
 # bilateral subcortical plots — merge L+R then use zoomed matplotlib figures
 BILATERAL = [
-    ('IC',  'L-IC',  'R-IC',  [-12, -10, -8]),
-    ('MGN', 'L-MGN', 'R-MGN', [-10,  -8, -6]),
+    ('IC',  'L-IC',  'R-IC',  [-13, -12, -11, -10, -9]),
+    ('MGN', 'L-MGN', 'R-MGN', [ -9,  -8,  -7,  -6, -5]),
 ]
 
 for struct, lbl_l, lbl_r, z_slices in BILATERAL:
