@@ -247,32 +247,56 @@ def save_map(data, ref_img, fpath):
     print(f'  saved {fpath}')
 
 
+def _bivariate_rgb(norm_t, norm_s):
+    """
+    Non-wrapping 2-D color encoding:
+      hue   = 0.67*(1-norm_t)  →  blue (low temporal) … red (high temporal)
+      value = 0.35 + 0.65*norm_s  →  dark (low spectral) … bright (high spectral)
+      saturation = 1.0 (constant)
+    Only uses [0, 0.67] of the hue wheel so there is no wrap-around.
+    Inputs are arrays of any shape, values in [0, 1].
+    Returns float32 RGB array of same shape + trailing dim 3.
+    """
+    h = 0.67 * (1.0 - norm_t)
+    s = np.ones_like(h)
+    v = 0.35 + 0.65 * norm_s
+    hsv = np.stack([h, s, v], axis=-1)
+    return mcolors.hsv_to_rgb(hsv.reshape(-1, 3)).reshape(*h.shape, 3).astype(np.float32)
+
+
 def plot_bivariate_map(pref_t_img, pref_s_img,
                        temporal_rates, spectral_rates,
                        title, out_fpath,
                        z_slices_mni=None):
     """
-    Brain map where hue = preferred temporal rate, saturation = preferred
-    spectral rate. Voxels with pref_temporal == 0 are treated as out-of-mask.
-    Includes a 2-D color legend subplot.
+    Brain map where hue=temporal preference (blue→red, no wrap) and
+    brightness=spectral preference (dark→bright), overlaid on the MNI152
+    brain with a white ROI contour. Includes a 2-D color legend subplot.
     """
+    from nilearn import datasets as nl_datasets
+
     pref_t = pref_t_img.get_fdata()
     pref_s = pref_s_img.get_fdata()
     affine = pref_t_img.affine
     inv_aff = np.linalg.inv(affine)
+    shape = pref_t.shape
 
     mask = pref_t > 0
 
     t_min, t_max = temporal_rates[0], temporal_rates[-1]
     s_min, s_max = spectral_rates[0], spectral_rates[-1]
 
-    h = np.clip((pref_t - t_min) / (t_max - t_min), 0, 1)
-    s = np.clip((pref_s - s_min) / (s_max - s_min), 0, 1)
-    v = np.ones_like(h)
+    norm_t = np.clip((pref_t - t_min) / (t_max - t_min), 0, 1)
+    norm_s = np.clip((pref_s - s_min) / (s_max - s_min), 0, 1)
+    roi_rgb = _bivariate_rgb(norm_t, norm_s)
 
-    shape = h.shape
-    hsv = np.stack([h, s, v], axis=-1)
-    rgb = mcolors.hsv_to_rgb(hsv.reshape(-1, 3)).reshape(*shape, 3)
+    # MNI152 background resampled to data space
+    bg_img = image.resample_to_img(
+        nl_datasets.load_mni152_template(resolution=2),
+        pref_t_img, interpolation='continuous'
+    )
+    bg = bg_img.get_fdata().astype(np.float32)
+    bg = (bg - bg.min()) / (bg.max() - bg.min() + 1e-9)
 
     if z_slices_mni is None:
         z_slices_mni = [-20, -10, 0, 10, 20, 30]
@@ -286,24 +310,25 @@ def plot_bivariate_map(pref_t_img, pref_s_img,
 
     fig, axes = plt.subplots(1, n + 1, figsize=(3 * n + 3, 3.5))
 
+    alpha = 0.85
     for ax, (mni_z, vox_z) in zip(axes[:n], zip(z_slices_mni, vox_zs)):
-        ax.set_facecolor('k')
         if 0 <= vox_z < shape[2]:
-            sl_rgb = rgb[:, :, vox_z, :]
+            bg_sl = np.stack([bg[:, :, vox_z]] * 3, axis=-1)
+            out = bg_sl.copy()
             sl_mask = mask[:, :, vox_z]
-            sl_rgba = np.zeros((*sl_rgb.shape[:2], 4), dtype=np.float32)
-            sl_rgba[sl_mask, :3] = sl_rgb[sl_mask]
-            sl_rgba[sl_mask, 3] = 1.0
-            ax.imshow(np.rot90(sl_rgba), aspect='equal', interpolation='nearest')
+            out[sl_mask] = (alpha * roi_rgb[:, :, vox_z][sl_mask]
+                            + (1 - alpha) * bg_sl[sl_mask])
+            ax.imshow(np.rot90(out), aspect='equal', interpolation='nearest')
+            ax.contour(np.rot90(sl_mask.astype(float)),
+                       levels=[0.5], colors='white', linewidths=0.6)
         ax.set_title(f'z={mni_z}', fontsize=8)
         ax.axis('off')
 
-    # 2-D color legend: x = temporal (hue), y = spectral (saturation)
+    # 2-D color legend
     ax_leg = axes[-1]
     res = 64
     T2, S2 = np.meshgrid(np.linspace(0, 1, res), np.linspace(0, 1, res))
-    legend_hsv = np.stack([T2, S2, np.ones_like(T2)], axis=-1)
-    legend_rgb = mcolors.hsv_to_rgb(legend_hsv)
+    legend_rgb = _bivariate_rgb(T2, S2)
     ax_leg.imshow(legend_rgb, origin='lower', aspect='auto',
                   extent=[t_min, t_max, s_min, s_max])
     ax_leg.set_xlabel('Temporal pref (Hz)', fontsize=8)
@@ -313,6 +338,58 @@ def plot_bivariate_map(pref_t_img, pref_s_img,
     fig.suptitle(title, fontsize=9)
     fig.tight_layout()
     fig.savefig(out_fpath, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  saved {out_fpath}')
+
+
+def merge_bilateral(img_l, img_r):
+    """Sum two non-overlapping hemisphere images into one bilateral volume."""
+    d = img_l.get_fdata() + img_r.get_fdata()
+    return nib.Nifti1Image(d.astype(np.float32), img_l.affine, img_l.header)
+
+
+def plot_roi_zoomed(roi_img, title, out_fpath, cmap='RdYlBu_r',
+                    padding_vox=8, n_slices=5):
+    """
+    Crop to the bounding box of non-zero voxels and show n_slices
+    evenly-spaced axial slices. No crosshairs, truly zoomed.
+    """
+    data = roi_img.get_fdata()
+    affine = roi_img.affine
+
+    nz = np.nonzero(data)
+    if len(nz[0]) == 0:
+        print(f'  skipping {out_fpath} — no non-zero voxels')
+        return
+
+    x0 = max(0, nz[0].min() - padding_vox)
+    x1 = min(data.shape[0] - 1, nz[0].max() + padding_vox)
+    y0 = max(0, nz[1].min() - padding_vox)
+    y1 = min(data.shape[1] - 1, nz[1].max() + padding_vox)
+    z0 = max(0, nz[2].min() - padding_vox)
+    z1 = min(data.shape[2] - 1, nz[2].max() + padding_vox)
+
+    z_indices = np.round(np.linspace(z0, z1, n_slices)).astype(int)
+    vmax = np.abs(data[nz]).max()
+
+    fig, axes = plt.subplots(1, n_slices, figsize=(3 * n_slices, 3))
+    if n_slices == 1:
+        axes = [axes]
+    for ax, zi in zip(axes, z_indices):
+        crop = data[x0:x1 + 1, y0:y1 + 1, zi]
+        ax.imshow(np.rot90(crop), cmap=cmap, vmin=-vmax, vmax=vmax,
+                  aspect='equal', interpolation='nearest')
+        mni_z = int(np.round(
+            nib.affines.apply_affine(affine, [0, 0, zi])[2]))
+        ax.set_title(f'z={mni_z}mm', fontsize=8)
+        ax.axis('off')
+
+    sm = plt.cm.ScalarMappable(
+        cmap=cmap, norm=plt.Normalize(vmin=-vmax, vmax=vmax))
+    fig.colorbar(sm, ax=axes[-1], shrink=0.8)
+    fig.suptitle(title, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_fpath, dpi=200, bbox_inches='tight')
     plt.close(fig)
     print(f'  saved {out_fpath}')
 
@@ -544,86 +621,97 @@ if 'joint_pref_temporal' in group_imgs and 'joint_pref_spectral' in group_imgs:
         z_slices_mni=[-20, -10, 0, 10, 20, 30],
     )
 
-# bivariate maps for each subcortical ROI (zoomed z-slices)
-SUBCORT_Z = {'L-IC': [-20, -16, -12], 'R-IC': [-20, -16, -12],
-             'L-MGN': [-8, -4, 0],    'R-MGN': [-8, -4, 0]}
-for roi_label in ['L-IC', 'R-IC', 'L-MGN', 'R-MGN']:
-    if roi_label not in group_roi_imgs:
-        continue
-    ri = group_roi_imgs[roi_label]
-    if 'joint_pref_temporal' not in ri or 'joint_pref_spectral' not in ri:
-        continue
-    plot_bivariate_map(
-        ri['joint_pref_temporal'],
-        ri['joint_pref_spectral'],
-        temporal_rates, spectral_rates,
-        title=f'{roi_label} joint spectrotemporal preference',
-        out_fpath=os.path.join(
-            fig_dir, f'group_task-stgrid_roi-{roi_label}_map-bivariate.png'),
-        z_slices_mni=SUBCORT_Z[roi_label],
-    )
+# bilateral subcortical plots — merge L+R then use zoomed matplotlib figures
+BILATERAL = [('IC', 'L-IC', 'R-IC'), ('MGN', 'L-MGN', 'R-MGN')]
 
-# zoomed voxelwise plots for subcortical ROIs (IC and MGN)
-# cut_coords are MNI centers: IC ~(0, -36, -14), MGN ~(0, -26, -4)
-SUBCORT_PLOT_CFG = {
-    'L-IC':  ((-4,  -36, -14), 'Inf colliculus (L)'),
-    'R-IC':  (( 4,  -36, -14), 'Inf colliculus (R)'),
-    'L-MGN': ((-14, -26,  -4), 'Med geniculate (L)'),
-    'R-MGN': (( 14, -26,  -4), 'Med geniculate (R)'),
-}
-for map_name, title_suffix, cmap in [
-    ('pref_temporal',       'pref temporal (Hz)',       'RdYlBu_r'),
-    ('pref_spectral',       'pref spectral (cyc/oct)',  'RdYlGn'),
-    ('joint_pref_temporal', 'joint pref temporal (Hz)', 'RdYlBu_r'),
-    ('joint_pref_spectral', 'joint pref spectral (c/o)','RdYlGn'),
-]:
-    for roi_label, (cut_coords, roi_title) in SUBCORT_PLOT_CFG.items():
-        if roi_label not in group_roi_imgs:
+for struct, lbl_l, lbl_r in BILATERAL:
+    ri_l = group_roi_imgs.get(lbl_l, {})
+    ri_r = group_roi_imgs.get(lbl_r, {})
+
+    # bivariate joint map (bilateral)
+    img_t_l = ri_l.get('joint_pref_temporal')
+    img_t_r = ri_r.get('joint_pref_temporal')
+    img_s_l = ri_l.get('joint_pref_spectral')
+    img_s_r = ri_r.get('joint_pref_spectral')
+    if img_t_l and img_t_r and img_s_l and img_s_r:
+        plot_bivariate_map(
+            merge_bilateral(img_t_l, img_t_r),
+            merge_bilateral(img_s_l, img_s_r),
+            temporal_rates, spectral_rates,
+            title=f'{struct} joint spectrotemporal preference',
+            out_fpath=os.path.join(
+                fig_dir,
+                f'group_task-stgrid_roi-{struct}_map-bivariate.png'),
+        )
+
+    # zoomed single-colormap maps (bilateral, one PNG per map type)
+    for map_name, title_suffix, cmap in [
+        ('pref_temporal',       'pref temporal (Hz)',      'RdYlBu_r'),
+        ('pref_spectral',       'pref spectral (cyc/oct)', 'RdYlGn'),
+        ('joint_pref_temporal', 'joint pref temporal (Hz)','RdYlBu_r'),
+        ('joint_pref_spectral', 'joint pref spectral (c/o)','RdYlGn'),
+    ]:
+        img_l = ri_l.get(map_name)
+        img_r = ri_r.get(map_name)
+        if img_l is None or img_r is None:
             continue
-        if map_name not in group_roi_imgs[roi_label]:
-            continue
-        roi_img = group_roi_imgs[roi_label][map_name]
-        display = plotting.plot_stat_map(
-            roi_img,
-            title=f'{roi_title} — {title_suffix}',
-            colorbar=True,
+        plot_roi_zoomed(
+            merge_bilateral(img_l, img_r),
+            title=f'{struct} — {title_suffix}',
+            out_fpath=os.path.join(
+                fig_dir,
+                f'group_task-stgrid_roi-{struct}_map-{map_name}.png'),
             cmap=cmap,
-            cut_coords=cut_coords,
-            display_mode='ortho',
-            annotate=True,
         )
-        fig_fpath = os.path.join(
-            fig_dir,
-            f'group_task-stgrid_roi-{roi_label}_map-{map_name}.png'
-        )
-        display.savefig(fig_fpath, dpi=200)
-        display.close()
-        print(f'  saved {fig_fpath}')
 
 # ROI response surface heatmaps
+# 2-column layout: left-hemisphere ROIs in left column, right in right column
 if group_surfaces:
-    roi_order = [r for r, _ in SUBCORT_ROIS + CORTEX_ROIS
-                 if r in group_surfaces]
-    n_rois = len(roi_order)
-    fig, axes = plt.subplots(1, n_rois, figsize=(3 * n_rois, 3.5),
-                             constrained_layout=True)
-    if n_rois == 1:
-        axes = [axes]
-    for ax, roi_label in zip(axes, roi_order):
+    all_roi_order = [r for r, _ in SUBCORT_ROIS + CORTEX_ROIS
+                     if r in group_surfaces]
+    left_rois  = [r for r in all_roi_order if r.startswith('L-')]
+    right_rois = [r for r in all_roi_order if r.startswith('R-')]
+    n_rows = max(len(left_rois), len(right_rois))
+
+    # consistent colorscale across all ROIs
+    global_vmax = max(
+        np.abs(group_surfaces[r].values).max() for r in all_roi_order
+    )
+
+    fig, axes = plt.subplots(
+        n_rows, 2, figsize=(7, 3.2 * n_rows), constrained_layout=True
+    )
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    def _draw_surface(ax, roi_label):
         surf = group_surfaces[roi_label].values
-        vmax = np.abs(surf).max()
         im = ax.imshow(surf, aspect='auto', origin='lower',
-                       cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+                       cmap='RdBu_r', vmin=-global_vmax, vmax=global_vmax)
         ax.set_title(roi_label, fontsize=9)
         ax.set_xlabel('Spectral (cyc/oct)', fontsize=7)
         ax.set_ylabel('Temporal (Hz)', fontsize=7)
         ax.set_xticks(range(len(spectral_rates)))
         ax.set_yticks(range(len(temporal_rates)))
-        ax.set_xticklabels([f'{r:.2f}' for r in spectral_rates],
-                           fontsize=6)
-        ax.set_yticklabels([f'{r:.1f}' for r in temporal_rates],
-                           fontsize=6)
-        fig.colorbar(im, ax=ax, shrink=0.7, label='β')
+        ax.set_xticklabels([f'{r:.2f}' for r in spectral_rates], fontsize=6)
+        ax.set_yticklabels([f'{r:.1f}' for r in temporal_rates], fontsize=6)
+        return im
+
+    last_im = None
+    for row, roi_label in enumerate(left_rois):
+        last_im = _draw_surface(axes[row, 0], roi_label)
+    for row, roi_label in enumerate(right_rois):
+        last_im = _draw_surface(axes[row, 1], roi_label)
+
+    # hide unused axes
+    for row in range(len(left_rois), n_rows):
+        axes[row, 0].axis('off')
+    for row in range(len(right_rois), n_rows):
+        axes[row, 1].axis('off')
+
+    if last_im is not None:
+        fig.colorbar(last_im, ax=axes, shrink=0.5, label='β',
+                     location='right')
     heatmap_fpath = os.path.join(fig_dir,
                                  'group_task-stgrid_roi-surfaces.png')
     fig.savefig(heatmap_fpath, dpi=150)
