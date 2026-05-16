@@ -249,19 +249,19 @@ def save_map(data, ref_img, fpath):
 
 def _bivariate_rgb(norm_t, norm_s):
     """
-    Non-wrapping 2-D color encoding:
-      hue   = 0.67*(1-norm_t)  →  blue (low temporal) … red (high temporal)
-      value = 0.35 + 0.65*norm_s  →  dark (low spectral) … bright (high spectral)
-      saturation = 1.0 (constant)
-    Only uses [0, 0.67] of the hue wheel so there is no wrap-around.
-    Inputs are arrays of any shape, values in [0, 1].
+    Schönwiesner & Zatorre (2009) Fig 3 colormap.
+      R = 1 - norm_t  (red at low temporal; decreases as temporal increases)
+      B = 1 - norm_s  (blue at low spectral; decreases as spectral increases)
+      G = norm_t * norm_s  (green only when both are high)
+    Corners: purple (0,0), blue (1,0), red (0,1), green (1,1).
+    Inputs are arrays of any shape in [0, 1].
     Returns float32 RGB array of same shape + trailing dim 3.
     """
-    h = 0.67 * (1.0 - norm_t)
-    s = np.ones_like(h)
-    v = 0.35 + 0.65 * norm_s
-    hsv = np.stack([h, s, v], axis=-1)
-    return mcolors.hsv_to_rgb(hsv.reshape(-1, 3)).reshape(*h.shape, 3).astype(np.float32)
+    r = 1.0 - norm_t
+    g = norm_t * norm_s
+    b = 1.0 - norm_s
+    rgb = np.stack([r, g, b], axis=-1)
+    return np.clip(rgb, 0, 1).astype(np.float32)
 
 
 def plot_bivariate_map(pref_t_img, pref_s_img,
@@ -349,13 +349,16 @@ def merge_bilateral(img_l, img_r):
 
 
 def plot_roi_zoomed(roi_img, title, out_fpath, cmap='RdYlBu_r',
-                    padding_vox=8, n_slices=5):
+                    padding_vox=8, n_slices=5, z_slices_mni=None):
     """
-    Crop to the bounding box of non-zero voxels and show n_slices
-    evenly-spaced axial slices. No crosshairs, truly zoomed.
+    Crop to the bounding box of non-zero voxels and show axial slices.
+    Pass z_slices_mni to pin specific MNI z coordinates; otherwise
+    n_slices evenly-spaced slices spanning the ROI z-extent are used.
+    No crosshairs, truly zoomed.
     """
     data = roi_img.get_fdata()
     affine = roi_img.affine
+    inv_aff = np.linalg.inv(affine)
 
     nz = np.nonzero(data)
     if len(nz[0]) == 0:
@@ -369,16 +372,40 @@ def plot_roi_zoomed(roi_img, title, out_fpath, cmap='RdYlBu_r',
     z0 = max(0, nz[2].min() - padding_vox)
     z1 = min(data.shape[2] - 1, nz[2].max() + padding_vox)
 
-    z_indices = np.round(np.linspace(z0, z1, n_slices)).astype(int)
-    vmax = np.abs(data[nz]).max()
+    if z_slices_mni is not None:
+        z_indices = [int(np.round((inv_aff @ [0, 0, z, 1])[2]))
+                     for z in z_slices_mni]
+        z_indices = [np.clip(zi, z0, z1) for zi in z_indices]
+    else:
+        z_indices = list(np.round(np.linspace(z0, z1, n_slices)).astype(int))
 
-    fig, axes = plt.subplots(1, n_slices, figsize=(3 * n_slices, 3))
-    if n_slices == 1:
+    n_panels = len(z_indices)
+    vmax = np.abs(data[nz]).max()
+    roi_mask = data != 0
+
+    # MNI152 background resampled to data space
+    from nilearn import datasets as nl_datasets
+    bg_img = image.resample_to_img(
+        nl_datasets.load_mni152_template(resolution=2),
+        roi_img, interpolation='continuous'
+    )
+    bg = bg_img.get_fdata().astype(np.float32)
+    bg = (bg - bg.min()) / (bg.max() - bg.min() + 1e-9)
+
+    cmap_obj = plt.get_cmap(cmap)
+    norm = plt.Normalize(vmin=-vmax, vmax=vmax)
+
+    fig, axes = plt.subplots(1, n_panels, figsize=(3 * n_panels, 3))
+    if n_panels == 1:
         axes = [axes]
     for ax, zi in zip(axes, z_indices):
-        crop = data[x0:x1 + 1, y0:y1 + 1, zi]
-        ax.imshow(np.rot90(crop), cmap=cmap, vmin=-vmax, vmax=vmax,
-                  aspect='equal', interpolation='nearest')
+        bg_sl = np.stack([bg[x0:x1 + 1, y0:y1 + 1, zi]] * 3, axis=-1)
+        out = bg_sl.copy()
+        sl_data = data[x0:x1 + 1, y0:y1 + 1, zi]
+        sl_mask = roi_mask[x0:x1 + 1, y0:y1 + 1, zi]
+        roi_colors = cmap_obj(norm(sl_data[sl_mask]))[:, :3]
+        out[sl_mask] = 0.85 * roi_colors + 0.15 * bg_sl[sl_mask]
+        ax.imshow(np.rot90(out), aspect='equal', interpolation='nearest')
         mni_z = int(np.round(
             nib.affines.apply_affine(affine, [0, 0, zi])[2]))
         ax.set_title(f'z={mni_z}mm', fontsize=8)
@@ -386,7 +413,7 @@ def plot_roi_zoomed(roi_img, title, out_fpath, cmap='RdYlBu_r',
 
     sm = plt.cm.ScalarMappable(
         cmap=cmap, norm=plt.Normalize(vmin=-vmax, vmax=vmax))
-    fig.colorbar(sm, ax=axes[-1], shrink=0.8)
+    fig.colorbar(sm, ax=axes, shrink=0.8)
     fig.suptitle(title, fontsize=9)
     fig.tight_layout()
     fig.savefig(out_fpath, dpi=200, bbox_inches='tight')
@@ -549,7 +576,6 @@ else:
         group_surfaces[roi_label] = group_surf
         print(f'  saved {group_surf_fpath} ({len(csv_fpaths)} subjects)')
 
-
 ''' Step 6: Visualization (group mode only) '''
 if sub_filter:
     print('\nDone.')
@@ -622,9 +648,12 @@ if 'joint_pref_temporal' in group_imgs and 'joint_pref_spectral' in group_imgs:
     )
 
 # bilateral subcortical plots — merge L+R then use zoomed matplotlib figures
-BILATERAL = [('IC', 'L-IC', 'R-IC'), ('MGN', 'L-MGN', 'R-MGN')]
+BILATERAL = [
+    ('IC',  'L-IC',  'R-IC',  [-12, -10, -8]),
+    ('MGN', 'L-MGN', 'R-MGN', [-10,  -8, -6]),
+]
 
-for struct, lbl_l, lbl_r in BILATERAL:
+for struct, lbl_l, lbl_r, z_slices in BILATERAL:
     ri_l = group_roi_imgs.get(lbl_l, {})
     ri_r = group_roi_imgs.get(lbl_r, {})
 
@@ -642,6 +671,7 @@ for struct, lbl_l, lbl_r in BILATERAL:
             out_fpath=os.path.join(
                 fig_dir,
                 f'group_task-stgrid_roi-{struct}_map-bivariate.png'),
+            z_slices_mni=z_slices,
         )
 
     # zoomed single-colormap maps (bilateral, one PNG per map type)
@@ -662,10 +692,10 @@ for struct, lbl_l, lbl_r in BILATERAL:
                 fig_dir,
                 f'group_task-stgrid_roi-{struct}_map-{map_name}.png'),
             cmap=cmap,
+            z_slices_mni=z_slices,
         )
 
-# ROI response surface heatmaps
-# 2-column layout: left-hemisphere ROIs in left column, right in right column
+# ROI response surface heatmaps — L column / R column, all ROIs separate
 if group_surfaces:
     all_roi_order = [r for r, _ in SUBCORT_ROIS + CORTEX_ROIS
                      if r in group_surfaces]
@@ -673,7 +703,6 @@ if group_surfaces:
     right_rois = [r for r in all_roi_order if r.startswith('R-')]
     n_rows = max(len(left_rois), len(right_rois))
 
-    # consistent colorscale across all ROIs
     global_vmax = max(
         np.abs(group_surfaces[r].values).max() for r in all_roi_order
     )
@@ -702,8 +731,6 @@ if group_surfaces:
         last_im = _draw_surface(axes[row, 0], roi_label)
     for row, roi_label in enumerate(right_rois):
         last_im = _draw_surface(axes[row, 1], roi_label)
-
-    # hide unused axes
     for row in range(len(left_rois), n_rows):
         axes[row, 0].axis('off')
     for row in range(len(right_rois), n_rows):
