@@ -680,9 +680,11 @@ else:
         if not sub_means:
             continue
 
-        # grand mean across all ROIs (per subject) as null reference
-        df_wide = pd.DataFrame(sub_means)   # subjects × ROIs
-        grand_mean_val = df_wide.values[~np.isnan(df_wide.values)].mean()
+        # grand mean across all ROIs and subjects as null reference
+        all_vals_flat = np.array(
+            [v for vals in sub_means.values() for v in vals], dtype=float
+        )
+        grand_mean_val = np.nanmean(all_vals_flat)
 
         for roi_label, vals in sub_means.items():
             arr = np.array(vals, dtype=float)
