@@ -191,10 +191,11 @@ for mx, mask_descrip in enumerate(roi_list):
     mask_fpath = os.path.join(masks_dir, 
                               f'sub-{subject_id}_space-{space_label}_mask-{mask_descrip}.nii.gz')
 
-    # run-specific stimulus stat maps
+    # per-condition stimulus stat maps (STgrid GLMsingle saves one beta per
+    # condition -- stim01.nii.gz .. stim16.nii.gz -- no per-run/per-rep split)
     if window_descrip=='trial':
-        stat_maps = sorted(glob(model_sub_dir+f'/*di*.nii.gz')) 
-        print('# of stat maps: ', len(stat_maps))    
+        stat_maps = sorted(glob(model_sub_dir+f'/stim*.nii.gz'))
+        print('# of stat maps: ', len(stat_maps))
 
         #conditions_all = [(os.path.basename(x).split('_')[1].split('.')[0]) for x in (stat_maps)]
         conditions_all = [(os.path.basename(x).split('.')[0]) for x in (stat_maps)]

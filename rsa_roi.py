@@ -89,8 +89,20 @@ roi_list = [
             'R-ParsOp', 'R-ParsTri', 
            ]
 
-''' Generate trial-specific RDMs '''
+''' Generate stimulus-pattern RDMs '''
 assert analysis_window == 'trial'
+
+# STgrid's GLMsingle modeling produces exactly one beta image per condition
+# per subject (stim01.nii.gz .. stim16.nii.gz, averaged across all runs in a
+# single GLM) -- no per-run or per-repetition split, unlike the tonecat/FLT2
+# pipeline this script was originally adapted from. So there's nothing to
+# cross-validate: crossnobis needs independent partitions (e.g. runs) of the
+# same condition, which don't exist here.
+if method_label == 'crossnobis':
+    sys.exit("--method=crossnobis requires repeated measurements per condition "
+             "(e.g. per-run betas) to cross-validate against. STgrid's GLMsingle "
+             "output is one beta per condition -- use --method=euclidean or "
+             "--method=correlation instead.")
 
 model_folder = os.path.join(model_dir,
                             'masked_statmaps',
@@ -101,12 +113,9 @@ print('model_folder:', model_folder)
 
 roi_rdm_list = []
 
-# ---- regex patterns ----
-run_re  = re.compile(r'run-(\d+)')
-stim_re = re.compile(r'(di\d+_[A-Za-z]+)')
-rep_re  = re.compile(r'rep-(\d+)')
+# ---- regex pattern ----
+stim_re = re.compile(r'(stim\d+)')
 
-'''
 for roi in roi_list:
     roi_folder = os.path.join(model_folder, f'mask-{roi}')
     csv_files = sorted(glob(os.path.join(roi_folder, '*.csv')))
@@ -116,145 +125,33 @@ for roi in roi_list:
         continue
 
     data_list = []
-    obs_desc = {
-        'run': [],
-        'stimulus': [],
-        'rep': []
-    }
+    obs_desc  = {'stimulus': []}
 
-    # ---- loop over ALL files (all runs) ----
     for f in csv_files:
         fname = os.path.basename(f)
-
-        m_run  = run_re.search(fname)
-        stim   = stim_re.search(fname)
-        rep    = rep_re.search(fname)
-
-        if m_run is None or stim is None or rep is None:
+        stim  = stim_re.search(fname)
+        if stim is None:
             continue
-
-        run_label  = f'run-{m_run.group(1)}'
-        stim_label = stim.group(1)
-        rep_label  = f'rep-{rep.group(1)}'
-
         try:
-            vec = np.genfromtxt(f)
+            vec = np.atleast_1d(np.genfromtxt(f))
         except Exception:
             continue
-
-        vec = np.atleast_1d(vec)
-
         data_list.append(vec)
-        obs_desc['run'].append(run_label)
-        obs_desc['stimulus'].append(stim_label)
-        obs_desc['rep'].append(rep_label)
+        obs_desc['stimulus'].append(stim.group(1))
 
     if len(data_list) < 2:
-        print(f'Skipping ROI {roi} (not enough trials)')
+        print(f'Skipping ROI {roi} (not enough stimulus patterns)')
         continue
 
-    data = np.vstack(data_list)
-
-    # ---- ONE dataset per ROI, across runs ----
     dataset = rsatoolbox.data.Dataset(
-        data,
-        descriptors={
-            'participant': sub_id,
-            'ROI': roi
-        },
+        np.vstack(data_list),
+        descriptors={'participant': sub_id, 'ROI': roi},
         obs_descriptors=obs_desc
     )
-
-    # ---- crossvalidated RDM ----
     rdm = rsatoolbox.rdm.calc_rdm(
-        dataset,
-        method=method_label,
-        descriptor='stimulus',
-        cv_descriptor='run'
+        dataset, method=method_label, descriptor='stimulus'
     )
-
     roi_rdm_list.append(rdm)
-'''
-
-for roi in roi_list:
-    roi_folder = os.path.join(model_folder, f'mask-{roi}')
-    csv_files = sorted(glob(os.path.join(roi_folder, '*.csv')))
-
-    if len(csv_files) == 0:
-        print(f'No files found for ROI {roi}')
-        continue
-
-    # group files by run
-    run_files = {}
-    for f in csv_files:
-        fname  = os.path.basename(f)
-        m_run  = run_re.search(fname)
-        stim   = stim_re.search(fname)
-        rep    = rep_re.search(fname)
-
-        if m_run is None or stim is None or rep is None:
-            continue
-
-        run_label = f'run-{m_run.group(1)}'
-        run_files.setdefault(run_label, []).append((f, stim.group(1), f'rep-{rep.group(1)}'))
-
-    if method_label == 'crossnobis':
-        data_list = []
-        obs_desc  = {'run': [], 'stimulus': [], 'rep': []}
-
-        for run_label, file_entries in sorted(run_files.items()):
-            for f, stim_label, rep_label in file_entries:
-                try:
-                    vec = np.atleast_1d(np.genfromtxt(f))
-                except Exception:
-                    continue
-                data_list.append(vec)
-                obs_desc['run'].append(run_label)
-                obs_desc['stimulus'].append(stim_label)
-                obs_desc['rep'].append(rep_label)
-
-        if len(data_list) < 2:
-            print(f'Skipping ROI {roi} (not enough trials)')
-            continue
-
-        dataset = rsatoolbox.data.Dataset(
-            np.vstack(data_list),
-            descriptors={'participant': sub_id, 'ROI': roi},
-            obs_descriptors=obs_desc
-        )
-        rdm = rsatoolbox.rdm.calc_rdm(
-            dataset, method=method_label, descriptor='stimulus', cv_descriptor='run'
-        )
-        roi_rdm_list.append(rdm)
-
-    else:
-        for run_label, file_entries in sorted(run_files.items()):
-            data_list = []
-            obs_desc  = {'run': [], 'stimulus': [], 'rep': []}
-
-            for f, stim_label, rep_label in file_entries:
-                try:
-                    vec = np.atleast_1d(np.genfromtxt(f))
-                except Exception:
-                    continue
-                data_list.append(vec)
-                obs_desc['run'].append(run_label)
-                obs_desc['stimulus'].append(stim_label)
-                obs_desc['rep'].append(rep_label)
-
-            if len(data_list) < 2:
-                print(f'Skipping ROI {roi}, {run_label} (not enough trials)')
-                continue
-
-            dataset = rsatoolbox.data.Dataset(
-                np.vstack(data_list),
-                descriptors={'participant': sub_id, 'ROI': roi, 'run': run_label},
-                obs_descriptors=obs_desc
-            )
-            rdm = rsatoolbox.rdm.calc_rdm(
-                dataset, method=method_label, descriptor='stimulus'
-            )
-            roi_rdm_list.append(rdm)
 
 concat_rdms = rsatoolbox.rdm.rdms.concat(roi_rdm_list)
 concat_rdms.descriptors['participant'] = sub_id
