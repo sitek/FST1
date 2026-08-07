@@ -92,17 +92,11 @@ roi_list = [
 ''' Generate stimulus-pattern RDMs '''
 assert analysis_window == 'trial'
 
-# STgrid's GLMsingle modeling produces exactly one beta image per condition
-# per subject (stim01.nii.gz .. stim16.nii.gz, averaged across all runs in a
-# single GLM) -- no per-run or per-repetition split, unlike the tonecat/FLT2
-# pipeline this script was originally adapted from. So there's nothing to
-# cross-validate: crossnobis needs independent partitions (e.g. runs) of the
-# same condition, which don't exist here.
-if method_label == 'crossnobis':
-    sys.exit("--method=crossnobis requires repeated measurements per condition "
-             "(e.g. per-run betas) to cross-validate against. STgrid's GLMsingle "
-             "output is one beta per condition -- use --method=euclidean or "
-             "--method=correlation instead.")
+# STgrid's GLMsingle modeling produces one beta image per condition per run
+# (stim01_run-01.nii.gz .. stim16_run-02.nii.gz for the 2 STgrid runs -- see
+# save_betas_as_nifti in modeling_firstlevel_GLMsingle_stgrid.py). With 2
+# independent runs per condition, crossnobis cross-validation (train on one
+# run, test on the other) is valid -- pass --method=crossnobis to use it.
 
 model_folder = os.path.join(model_dir,
                             'masked_statmaps',
@@ -113,7 +107,8 @@ print('model_folder:', model_folder)
 
 roi_rdm_list = []
 
-# ---- regex pattern ----
+# ---- regex patterns ----
+run_re  = re.compile(r'run-(\d+)')
 stim_re = re.compile(r'(stim\d+)')
 
 for roi in roi_list:
@@ -125,18 +120,20 @@ for roi in roi_list:
         continue
 
     data_list = []
-    obs_desc  = {'stimulus': []}
+    obs_desc  = {'run': [], 'stimulus': []}
 
     for f in csv_files:
-        fname = os.path.basename(f)
-        stim  = stim_re.search(fname)
-        if stim is None:
+        fname  = os.path.basename(f)
+        m_run  = run_re.search(fname)
+        stim   = stim_re.search(fname)
+        if m_run is None or stim is None:
             continue
         try:
             vec = np.atleast_1d(np.genfromtxt(f))
         except Exception:
             continue
         data_list.append(vec)
+        obs_desc['run'].append(f'run-{m_run.group(1)}')
         obs_desc['stimulus'].append(stim.group(1))
 
     if len(data_list) < 2:
@@ -148,9 +145,15 @@ for roi in roi_list:
         descriptors={'participant': sub_id, 'ROI': roi},
         obs_descriptors=obs_desc
     )
-    rdm = rsatoolbox.rdm.calc_rdm(
-        dataset, method=method_label, descriptor='stimulus'
-    )
+
+    if method_label == 'crossnobis':
+        rdm = rsatoolbox.rdm.calc_rdm(
+            dataset, method=method_label, descriptor='stimulus', cv_descriptor='run'
+        )
+    else:
+        rdm = rsatoolbox.rdm.calc_rdm(
+            dataset, method=method_label, descriptor='stimulus'
+        )
     roi_rdm_list.append(rdm)
 
 concat_rdms = rsatoolbox.rdm.rdms.concat(roi_rdm_list)

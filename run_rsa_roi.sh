@@ -6,7 +6,7 @@
 bidsroot=/bgfs/bchandrasekaran/krs228/data/FLT/data_denoised/
 python rsa_roi.py --sub=$1 \
     --analysis_window=trial \
-    --method=euclidean \
+    --method=crossnobis \
     --model=glmsingle \
     --mask_dir=${bidsroot}/derivatives/nilearn/masks/ \
     --bidsroot=${bidsroot} \

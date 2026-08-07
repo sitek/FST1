@@ -191,8 +191,10 @@ for mx, mask_descrip in enumerate(roi_list):
     mask_fpath = os.path.join(masks_dir, 
                               f'sub-{subject_id}_space-{space_label}_mask-{mask_descrip}.nii.gz')
 
-    # per-condition stimulus stat maps (STgrid GLMsingle saves one beta per
-    # condition -- stim01.nii.gz .. stim16.nii.gz -- no per-run/per-rep split)
+    # per-condition, per-run stimulus stat maps (STgrid GLMsingle saves one
+    # beta per condition per run -- stim01_run-01.nii.gz .. stim16_run-02.nii.gz
+    # for the 2 STgrid runs -- see save_betas_as_nifti in
+    # modeling_firstlevel_GLMsingle_stgrid.py)
     if window_descrip=='trial':
         stat_maps = sorted(glob(model_sub_dir+f'/stim*.nii.gz'))
         print('# of stat maps: ', len(stat_maps))

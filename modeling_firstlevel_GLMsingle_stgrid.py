@@ -130,18 +130,38 @@ def convert_events_to_glmsingle(models_events, tr, n_trs_per_run):
 
 
 def save_betas_as_nifti(results, condition_names, ref_nib_img, outputdir):
-    """Save GLMsingle TYPED beta estimates as one nii.gz per condition."""
-    betas = results['typed']['betasmd']  # shape: (X, Y, Z, n_conditions)
+    """Save GLMsingle TYPED beta estimates as one nii.gz per condition per run.
+
+    `condition_names` is a list of lists -- one list of condition names per
+    run, in the same run order the design matrices were passed to
+    GLMsingle.fit(). GLMsingle flattens every run's design-matrix columns
+    into betasmd's last axis in that same run-then-column order (see
+    GLMsingle.ipynb's indexing scheme), so this must iterate runs then
+    conditions to recover the correct (run, condition) label for each slice.
+    """
+    betas = results['typed']['betasmd']  # shape: (X, Y, Z, sum of columns across runs)
+    n_expected = sum(len(names) for names in condition_names)
+    assert betas.shape[-1] == n_expected, (
+        f'betasmd has {betas.shape[-1]} volumes but condition_names implies '
+        f'{n_expected} (across {len(condition_names)} runs) -- indexing would be wrong'
+    )
+
     beta_dir = os.path.join(outputdir, 'beta_images')
     os.makedirs(beta_dir, exist_ok=True)
     affine = ref_nib_img.affine
     header = ref_nib_img.header
-    for i, cond_name in enumerate(condition_names):
-        img = nib.Nifti1Image(betas[:, :, :, i].astype(np.float32), affine, header)
-        out_fpath = os.path.join(beta_dir, f'{cond_name}.nii.gz')
-        nib.save(img, out_fpath)
-        print(f'  saved {out_fpath}')
-    print(f'Saved {len(condition_names)} beta images to {beta_dir}')
+
+    idx = 0
+    n_saved = 0
+    for r, run_condition_names in enumerate(condition_names):
+        for cond_name in run_condition_names:
+            img = nib.Nifti1Image(betas[:, :, :, idx].astype(np.float32), affine, header)
+            out_fpath = os.path.join(beta_dir, f'{cond_name}_run-{r+1:02d}.nii.gz')
+            nib.save(img, out_fpath)
+            print(f'  saved {out_fpath}')
+            idx += 1
+            n_saved += 1
+    print(f'Saved {n_saved} beta images to {beta_dir}')
 
 
 def save_r2_as_nifti(results, ref_nib_img, outputdir):
@@ -215,9 +235,13 @@ print('stimdur (in s):', stimdur)
 
 glmsingle_matrices, condition_names = convert_events_to_glmsingle(models_events, tr, n_trs_per_run)
 
-# condition_names is a list-of-lists (one per run); use first run's list as the canonical order
-canonical_condition_names = condition_names[0]
-print('conditions:', canonical_condition_names)
+# condition_names is a list-of-lists, one list per run, in the same run order
+# as glmsingle_matrices/data -- this full structure (not just run 1) is what
+# save_betas_as_nifti needs to correctly label every (run, condition) volume.
+n_runs = len(condition_names)
+n_betas_expected = sum(len(names) for names in condition_names)
+print(f'conditions per run: {condition_names}')
+print(f'{n_runs} runs, {n_betas_expected} beta volumes expected')
 
 start_time = time.time()
 
@@ -233,7 +257,7 @@ if not os.path.exists(outputdir_glmsingle):
 
     # save TYPED beta estimates and R² as nii.gz files
     ref_img = nib.load(models_run_imgs[0][0])
-    save_betas_as_nifti(results_glmsingle, canonical_condition_names,
+    save_betas_as_nifti(results_glmsingle, condition_names,
                         ref_img, outputdir_glmsingle)
     save_r2_as_nifti(results_glmsingle, ref_img, outputdir_glmsingle)
 
@@ -253,14 +277,20 @@ else:
                                               'TYPED_FITHRF_GLMDENOISE_RR.npy'),
                                          allow_pickle=True).item()
 
-    # save nii.gz betas and R² if not already done
+    # save nii.gz betas and R² if not already done. Check the *count* of
+    # existing files, not just directory existence -- a previous buggy
+    # version of save_betas_as_nifti only ever exported run 1's volumes,
+    # so a stale/incomplete beta_images/ dir must be regenerated here.
     ref_img = nib.load(models_run_imgs[0][0])
     beta_dir = os.path.join(outputdir_glmsingle, 'beta_images')
-    if not os.path.exists(beta_dir):
-        save_betas_as_nifti(results_glmsingle, canonical_condition_names,
+    existing_betas = glob(os.path.join(beta_dir, '*.nii.gz'))
+    if len(existing_betas) != n_betas_expected:
+        print(f'beta_images/ has {len(existing_betas)} files, expected {n_betas_expected} '
+              '-- (re)exporting')
+        save_betas_as_nifti(results_glmsingle, condition_names,
                             ref_img, outputdir_glmsingle)
     else:
-        print('beta_images directory already exists, skipping nii.gz export')
+        print('beta_images directory already complete, skipping nii.gz export')
     r2_path = os.path.join(outputdir_glmsingle, 'R2.nii.gz')
     if not os.path.exists(r2_path):
         save_r2_as_nifti(results_glmsingle, ref_img, outputdir_glmsingle)

@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from glob import glob
+from collections import defaultdict
 
 parser = argparse.ArgumentParser(
     description='Compute representational dimensionality (PR + eigenspectra) per ROI',
@@ -44,19 +45,21 @@ roi_list = [
     'R-ParsOp', 'R-ParsTri',
 ]
 
-# STgrid's GLMsingle modeling produces exactly one beta image per condition
-# per subject (stim01.nii.gz .. stim16.nii.gz, averaged across all runs in a
-# single GLM) -- no per-run or per-repetition split, unlike the tonecat/FLT2
-# pipeline this script was originally adapted from. So there's no run-demean
-# or repetition-averaging step: each ROI just gets one pattern per stimulus.
+# STgrid's GLMsingle modeling produces one beta image per condition per run
+# (stim01_run-01.nii.gz .. stim16_run-02.nii.gz for the 2 STgrid runs -- see
+# save_betas_as_nifti in modeling_firstlevel_GLMsingle_stgrid.py). Repeated
+# within-run presentations of a condition are already pooled into that one
+# beta by the GLM design matrix, so there's no separate "rep" level -- just
+# run and stimulus.
+run_re  = re.compile(r'run-(\d+)')
 stim_re = re.compile(r'(stim\d+)')
 
 
 def load_roi_betas(sub_id, roi):
     """
-    Load one trial beta vector per stimulus condition for one subject x ROI.
+    Load one trial beta vector per (run, stimulus) for one subject x ROI.
 
-    Returns a dict: data[stim_label] = 1-D array
+    Returns a nested dict: data[run_label][stim_label] = 1-D array
     """
     roi_folder = os.path.join(
         glmsingle_dir, 'masked_statmaps',
@@ -66,11 +69,12 @@ def load_roi_betas(sub_id, roi):
     if not csv_files:
         return None
 
-    data = {}
+    data = defaultdict(dict)
     for fpath in csv_files:
         fname  = os.path.basename(fpath)
+        m_run  = run_re.search(fname)
         m_stim = stim_re.search(fname)
-        if m_stim is None:
+        if m_run is None or m_stim is None:
             continue
         try:
             vec = np.atleast_1d(np.genfromtxt(fpath))
@@ -78,23 +82,43 @@ def load_roi_betas(sub_id, roi):
             continue
         if vec.ndim == 0 or np.all(np.isnan(vec)):
             continue
-        data[m_stim.group(1)] = vec
+        data[f'run-{m_run.group(1)}'][m_stim.group(1)] = vec
 
     return data if data else None
 
 
 def build_stimulus_matrix(data):
     """
-    Given dict {stim_label: pattern_vector} from load_roi_betas(), stack into
-    (n_stimuli x n_voxels), sorted by stimulus label.
+    Given nested dict from load_roi_betas():
+      1. Run de-mean: subtract each run's across-stimulus mean pattern
+      2. Average the (now run-demeaned) pattern for each stimulus across runs
+      3. Return (stimulus_labels, X) where X is (n_stimuli x n_voxels)
     """
-    if not data or len(data) < 2:
+    demeaned = defaultdict(list)
+    for run_label, stim_dict in data.items():
+        all_vecs = list(stim_dict.values())
+        if not all_vecs:
+            continue
+        run_mean = np.mean(np.vstack(all_vecs), axis=0)
+        for stim_label, vec in stim_dict.items():
+            demeaned[stim_label].append(vec - run_mean)
+
+    if not demeaned:
         return None, None
 
-    stim_labels = sorted(data.keys())
-    min_len = min(len(data[s]) for s in stim_labels)
-    X = np.vstack([data[s][:min_len] for s in stim_labels])
-    return stim_labels, X
+    rows, valid_labels = [], []
+    for stim in sorted(demeaned.keys()):
+        vecs = demeaned[stim]
+        if not vecs:
+            continue
+        min_len = min(len(v) for v in vecs)
+        rows.append(np.vstack([v[:min_len] for v in vecs]).mean(axis=0))
+        valid_labels.append(stim)
+
+    if len(rows) < 2:
+        return None, None
+
+    return valid_labels, np.vstack(rows)
 
 
 def compute_dimensionality(X, standardize_voxels=True):
