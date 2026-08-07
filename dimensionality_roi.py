@@ -31,7 +31,7 @@ if len(sys.argv) < 2:
 sub_id   = args.sub
 bidsroot = args.bidsroot
 
-glmsingle_dir = os.path.join(bidsroot, 'derivatives', 'glmsingle')
+glmsingle_dir = os.path.join(bidsroot, 'derivatives', 'glmsingle_stgrid')
 out_dir       = os.path.join(glmsingle_dir, 'representational_dimensionality')
 os.makedirs(out_dir, exist_ok=True)
 

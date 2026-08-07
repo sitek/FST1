@@ -67,7 +67,7 @@ mask_dir     = args.mask_dir
 bidsroot     = args.bidsroot
 fmriprep_dir = args.fmriprep_dir
 
-glmsingle_dir = os.path.join(bidsroot, 'derivatives', 'glmsingle')
+glmsingle_dir = os.path.join(bidsroot, 'derivatives', 'glmsingle_stgrid')
 print(glmsingle_dir)
 
 roi_dict_MNI_dseg = {'L-Caud': 35, 'L-Put': 36, #'L-Pall': 37, 'L-Accumb': 41, 

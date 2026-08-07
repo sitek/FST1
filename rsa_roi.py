@@ -72,7 +72,7 @@ fmriprep_dir    = args.fmriprep_dir
 
 # other directory definitions
 deriv_dir = os.path.join(bidsroot, 'derivatives')
-model_dir = os.path.join(deriv_dir, 'glmsingle')
+model_dir = os.path.join(deriv_dir, 'glmsingle_stgrid')
 
 # method
 print('RDM calculation method: ', method_label)
