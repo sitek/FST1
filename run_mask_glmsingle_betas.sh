@@ -3,12 +3,11 @@
 
 # atlas options: 'tian-S2', 'tian-S3', 'dseg', 'subcort-aud'
 # model options: 'stimulus_per_run_LSS', 'run-all_LSS', 'per_run_LSA_confound-compcor_event-stimulus'
-bidsroot=/bgfs/bchandrasekaran/krs228/data/FLT/data_denoised/
+bidsroot=/ix1/bchandrasekaran/krs228/data/FLT/data_denoised/
 
 model=glmsingle
 
-#for atlas in tian-S3 dseg subcort-aud; do
-atlas=dseg
+for atlas in tian-S3 dseg subcort-aud; do
 python mask_glmsingle_betas.py --sub=$1 \
                            --fwhm=0.00 \
                            --atlas=$atlas \
@@ -19,8 +18,7 @@ python mask_glmsingle_betas.py --sub=$1 \
                             --mask_dir=$bidsroot/derivatives/nilearn/masks/ \
                             --bidsroot=$bidsroot \
                             --fmriprep_dir=$bidsroot/derivatives/denoised_fmriprep-22.1.1/
-#done
-#done
+done
 
 
 

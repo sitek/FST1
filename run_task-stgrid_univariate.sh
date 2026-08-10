@@ -3,7 +3,7 @@
 #SBATCH --time=6:00:00
 #SBATCH --mem-per-cpu=32G
 
-bidsroot=/bgfs/bchandrasekaran/krs228/data/FLT/data_denoised/
+bidsroot=/ix1/bchandrasekaran/krs228/data/FLT/data_denoised/
 
 python task-stgrid_univariate.py --sub=$1 --task=stgrid \
   --space=MNI152NLin2009cAsym --fwhm=3 \

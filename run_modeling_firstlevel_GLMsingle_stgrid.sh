@@ -4,7 +4,7 @@
 #SBATCH --mem=48G
 
 #conda activate py3
-bidsroot=/bgfs/bchandrasekaran/krs228/data/FLT/data_denoised/
+bidsroot=/ix1/bchandrasekaran/krs228/data/FLT/data_denoised/
 
 python modeling_firstlevel_GLMsingle_stgrid.py --sub=$1 --task=stgrid \
     --space=MNI152NLin2009cAsym --fwhm=0 \

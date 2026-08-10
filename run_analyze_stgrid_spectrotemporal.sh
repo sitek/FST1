@@ -3,10 +3,10 @@
 #SBATCH --time=4:00:00
 #SBATCH --mem=32G
 
-bidsroot=/bgfs/bchandrasekaran/krs228/data/FLT/data_denoised/
+bidsroot=/ix1/bchandrasekaran/krs228/data/FLT/data_denoised/
 mask_dir=$bidsroot/derivatives/nilearn/masks/
 out_dir=$bidsroot/derivatives/glmsingle_stgrid/spectrotemporal/
-grid_txt=/bgfs/bchandrasekaran/krs228/data/FLT/sourcedata/2022-2-8_Grid.txt
+grid_txt=/ix1/bchandrasekaran/krs228/data/FLT/sourcedata/2022-2-8_Grid.txt
 
 # optional: pass subject id as first argument to run a single subject
 sub_arg=""

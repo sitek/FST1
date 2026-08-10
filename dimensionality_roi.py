@@ -18,7 +18,7 @@ from collections import defaultdict
 parser = argparse.ArgumentParser(
     description='Compute representational dimensionality (PR + eigenspectra) per ROI',
     epilog=('Example: python dimensionality_roi.py --sub=FLT02 '
-            '--bidsroot=/bgfs/bchandrasekaran/krs228/data/FLT/data_denoised/')
+            '--bidsroot=/ix1/bchandrasekaran/krs228/data/FLT/data_denoised/')
 )
 parser.add_argument('--sub',      help='participant id', type=str, required=True)
 parser.add_argument('--bidsroot', help='top-level BIDS directory', type=str, required=True)
