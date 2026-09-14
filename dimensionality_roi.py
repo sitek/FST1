@@ -22,6 +22,12 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument('--sub',      help='participant id', type=str, required=True)
 parser.add_argument('--bidsroot', help='top-level BIDS directory', type=str, required=True)
+parser.add_argument('--glmsingle_dirname',
+                     help=('name of the derivatives subdirectory GLMsingle output/masked betas '
+                           'were written to (default: `glmsingle_stgrid`) -- must match the '
+                           'value passed to modeling_firstlevel_GLMsingle_stgrid.py / '
+                           'mask_glmsingle_betas.py for this run'),
+                     type=str, default='glmsingle_stgrid')
 args = parser.parse_args()
 
 if len(sys.argv) < 2:
@@ -30,8 +36,9 @@ if len(sys.argv) < 2:
 
 sub_id   = args.sub
 bidsroot = args.bidsroot
+glmsingle_dirname = args.glmsingle_dirname
 
-glmsingle_dir = os.path.join(bidsroot, 'derivatives', 'glmsingle_stgrid')
+glmsingle_dir = os.path.join(bidsroot, 'derivatives', glmsingle_dirname)
 out_dir       = os.path.join(glmsingle_dir, 'representational_dimensionality')
 os.makedirs(out_dir, exist_ok=True)
 

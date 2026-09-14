@@ -45,9 +45,14 @@ parser.add_argument("--mask_dir",
 parser.add_argument("--bidsroot", 
                     help="top-level directory of the BIDS dataset", 
                     type=str)
-parser.add_argument("--fmriprep_dir", 
-                    help="directory of the fMRIprep preprocessed dataset", 
+parser.add_argument("--fmriprep_dir",
+                    help="directory of the fMRIprep preprocessed dataset",
                     type=str)
+parser.add_argument("--glmsingle_dirname",
+                    help=("name of the derivatives subdirectory GLMsingle output was written "
+                          "to (default: `glmsingle_stgrid`) -- must match the value passed to "
+                          "modeling_firstlevel_GLMsingle_stgrid.py for this run"),
+                    type=str, default='glmsingle_stgrid')
 args = parser.parse_args()
 
 if len(sys.argv) < 2:
@@ -66,8 +71,9 @@ task_label = args.task
 mask_dir     = args.mask_dir
 bidsroot     = args.bidsroot
 fmriprep_dir = args.fmriprep_dir
+glmsingle_dirname = args.glmsingle_dirname
 
-glmsingle_dir = os.path.join(bidsroot, 'derivatives', 'glmsingle_stgrid')
+glmsingle_dir = os.path.join(bidsroot, 'derivatives', glmsingle_dirname)
 print(glmsingle_dir)
 
 roi_dict_MNI_dseg = {'L-Caud': 35, 'L-Put': 36, #'L-Pall': 37, 'L-Accumb': 41, 

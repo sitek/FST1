@@ -49,6 +49,13 @@ parser.add_argument("--bidsroot",
                     help="top-level directory of the BIDS dataset", type=str)
 parser.add_argument("--fmriprep_dir",
                     help="directory of the fMRIprep preprocessed dataset", type=str)
+parser.add_argument("--glmsingle_dirname",
+                    help=("name of the derivatives subdirectory to write GLMsingle output "
+                          "to (default: `glmsingle_stgrid`) -- pass a version/space-tagged "
+                          "name (e.g. `glmsingle_stgrid_fmriprep-25.2.5_space-T1w`) to keep a "
+                          "recomputed run from colliding with an existing fmriprep-version/"
+                          "space output"),
+                    type=str, default='glmsingle_stgrid')
 
 args = parser.parse_args()
 
@@ -66,6 +73,7 @@ t_acq        = args.t_acq
 t_r          = args.t_r
 bidsroot     = args.bidsroot
 fmriprep_dir = args.fmriprep_dir
+glmsingle_dirname = args.glmsingle_dirname
 
 # correct the fmriprep-given slice reference (middle slice, or 0.5)
 # to account for sparse acquisition (silent gap during auditory presentation paradigm)
@@ -178,10 +186,12 @@ def save_r2_as_nifti(results, ref_nib_img, outputdir):
 print('bidsroot: ', bidsroot)
 print('fmriprep dir:', fmriprep_dir)
 
-# output directory — stgrid-specific to avoid confusion with tonecat outputs
+# output directory — stgrid-specific to avoid confusion with tonecat outputs, and
+# version/space-tagged via --glmsingle_dirname to avoid confusion across fmriprep
+# versions/spaces (e.g. the 22.1.1/MNI vs. 25.2.5/T1w recomputes)
 bidsderiv_dir = os.path.join(bidsroot,
                              'derivatives',
-                             'glmsingle_stgrid',
+                             glmsingle_dirname,
                              'subject_level')
 if not os.path.exists(bidsderiv_dir):
     os.makedirs(bidsderiv_dir)
