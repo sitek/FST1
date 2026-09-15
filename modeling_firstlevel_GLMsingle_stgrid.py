@@ -75,9 +75,13 @@ bidsroot     = args.bidsroot
 fmriprep_dir = args.fmriprep_dir
 glmsingle_dirname = args.glmsingle_dirname
 
-# correct the fmriprep-given slice reference (middle slice, or 0.5)
-# to account for sparse acquisition (silent gap during auditory presentation paradigm)
-slice_time_ref = 0.5 * t_acq / t_r
+# slice_time_ref intentionally left unset below (not the old manual
+# 0.5*t_acq/t_r sparse-acquisition correction) -- fMRI_auditory-category-learning's
+# univariate_glm.py confirmed on real output (sub-FLT02's statmap.json) that
+# first_level_from_bids successfully infers it from the BOLD JSON sidecar's
+# StartTime field (0.3233, matching the old manual formula's 0.3333 to within
+# ~3%) rather than falling back to the wrong default of 0.0. --t_acq is still
+# accepted as a CLI arg for backward compatibility but no longer used here.
 
 
 ''' Pre-modeling functions '''
@@ -205,7 +209,6 @@ models, models_run_imgs, \
                                                  sub_labels=[subject_id],
                                                  smoothing_fwhm=fwhm,
                                                  derivatives_folder=fmriprep_dir,
-                                                 slice_time_ref=slice_time_ref,
                                                  minimize_memory=False)
 print('models_run_imgs:', models_run_imgs)
 
