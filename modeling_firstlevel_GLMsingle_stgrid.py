@@ -258,7 +258,15 @@ print(f'{n_runs} runs, {n_betas_expected} beta volumes expected')
 
 start_time = time.time()
 
-if not os.path.exists(outputdir_glmsingle):
+# GLMsingle creates outputdir_glmsingle (and writes intermediate files into it)
+# before the fit actually finishes, so directory existence alone doesn't mean a
+# completed run -- an interrupted job (walltime, OOM, crash) leaves a directory
+# behind with no .npy outputs, which the old `if not os.path.exists(...)` check
+# would misread as "already done" and crash trying to load files that were
+# never written. Check for the last file GLMsingle writes instead.
+typed_npy_path = os.path.join(outputdir_glmsingle, 'TYPED_FITHRF_GLMDENOISE_RR.npy')
+
+if not os.path.exists(typed_npy_path):
     print(f'running GLMsingle...')
 
     results_glmsingle = glmsingle_obj.fit(
